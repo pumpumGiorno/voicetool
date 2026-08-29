@@ -1,0 +1,10 @@
+# Работа на видеокарте NVIDIA. Файл отдельный: без него программа считает на процессоре,
+# и это нормально — GPU нужен только ради скорости.
+#
+#   pip install -r requirements-gpu.txt
+#
+# CTranslate2 4.x (движок faster-whisper) требует именно эти версии: cuBLAS из CUDA 12
+# и cuDNN 9. Вместе они весят около 2 ГБ, поэтому в основной requirements.txt их нет
+# и в VoiceTool.exe они не попадают.
+nvidia-cublas-cu12
+nvidia-cudnn-cu12==9.*

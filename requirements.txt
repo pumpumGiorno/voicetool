@@ -1,0 +1,22 @@
+# Локальное распознавание речи (Whisper на движке CTranslate2, работает офлайн).
+# Тянет за собой ctranslate2, av (декодер аудио/видео) и onnxruntime (VAD).
+faster-whisper>=1.1
+
+# Запись с микрофона — нужна только для режима listen.
+sounddevice>=0.4
+
+numpy>=1.24
+
+# Токенизатор для офлайн-перевода; сам движок перевода — ctranslate2 из faster-whisper.
+sentencepiece>=0.2
+
+# Графический интерфейс. Essentials вместо полного PySide6: QtWebEngine, Qt3D и прочее
+# не нужны, а весят они больше, чем всё остальное вместе взятое.
+PySide6-Essentials>=6.7
+
+# Сборка VoiceTool.exe. Для работы программы не требуется — только для build_exe.py.
+pyinstaller>=6.0
+
+# Работа на видеокарте NVIDIA — отдельным файлом: cuBLAS и cuDNN весят около 2 ГБ,
+# а без них программа просто считает на процессоре.
+#   pip install -r requirements-gpu.txt

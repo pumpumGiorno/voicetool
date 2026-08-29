@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+config.json
+
+# сборка
+build/
+build-onefile/
+dist/
+*.spec.bak
+build_assets/
+
+# скриншоты дымового теста интерфейса
+screenshots/
