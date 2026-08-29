@@ -210,6 +210,12 @@ def test_hotkey_parsing():
     assert hotkey.parse("ctrl+shift+f5")[1] == 0x74
     assert hotkey.parse("F8") == (0, 0x77), "одиночная клавиша разрешена (бинд на одну кнопку)"
     assert hotkey.parse("A") == (0, ord("A")), "одиночная буква тоже разрешена"
+    assert hotkey.parse("Escape") == (0, 0x1B)
+    assert hotkey.parse("Tab") == (0, 0x09)
+    assert hotkey.parse("Windows") == (0, hotkey.VK_LWIN), "одиночная клавиша Windows"
+    assert hotkey.parse("Win") == (0, hotkey.VK_LWIN)
+    assert hotkey.parse("Win+F8") == (hotkey.MOD_WIN, 0x77), "Win в сочетании — модификатор"
+    assert hotkey.parse("PrintScreen") == (0, 0x2C)
     assert hotkey.parse("") is None
     assert hotkey.parse("Ctrl+Чепуха") is None
 

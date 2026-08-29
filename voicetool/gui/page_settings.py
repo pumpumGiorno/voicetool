@@ -244,9 +244,11 @@ class SettingsPage(QWidget):
         form.addRow("Горячая клавиша", self.fields["hotkey"])
         self.hotkey_hint = label("", name="Dim", wrap=True)
         lay.addWidget(self.hotkey_hint)
-        lay.addWidget(label("Можно одну клавишу без модификаторов, например F8 или Insert. "
+        lay.addWidget(label("Можно одну клавишу без модификаторов: F8, Escape, Tab, Insert, "
+                            "Windows, Pause, PrintScreen и т.п. "
                             "Одиночная буква или цифра будет перехватываться во всех программах — "
-                            "для букв лучше оставить сочетание вроде Ctrl+Alt+A.",
+                            "для букв лучше оставить сочетание вроде Ctrl+Alt+A. "
+                            "Одиночная Windows дополнительно откроет меню «Пуск» — это системное поведение.",
                             name="Dim", wrap=True))
         self.fields["hotkey"].textChanged.connect(self._check_hotkey)
         return frame
