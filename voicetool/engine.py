@@ -15,13 +15,14 @@
 слушается маленькой моделью, а сама команда — основной.
 """
 import logging
+import queue
 import threading
 import time
 
 from .audio import Recorder, file_frames, mic_frames
 from .counter import WordCounter, append_log
 from .history import History
-from .text import count_words, find_wake_word
+from .text import count_words, find_wake_word, strip_trigger
 from .vocabulary import Vocabulary
 
 log = logging.getLogger(__name__)
@@ -54,6 +55,11 @@ class Listener:
         self._asr = None
         self._wake_asr = None
         self.state = IDLE
+        # голосовой агент («Алиса, сделай …») — живёт в своём потоке, слушатель
+        # продолжает работать и передаёт ему стоп-слово и фразу подтверждения
+        self._agent = None
+        self._agent_thread = None
+        self._agent_answers = queue.Queue()
 
     # --- управление ---------------------------------------------------------
 
@@ -73,6 +79,9 @@ class Listener:
         """wait с запасом: поток может доигрывать фразу, а микрофон нужно освободить
         до того, как его откроет новый слушатель."""
         self._stop.set()
+        if self._agent is not None:
+            self._agent.stop()
+            self._agent_answers.put("")  # разблокировать возможное ожидание подтверждения
         thread = self._thread
         if thread and thread.is_alive() and threading.current_thread() is not thread:
             thread.join(timeout=wait)
@@ -212,6 +221,9 @@ class Listener:
             self._emit_state(DONE, "")
             return
 
+        if self._route_to_agent(command, wake_window):
+            return
+
         log.info("Распознано: %s", command)
         added = self.counter.add(command)
         self.history.add(command, kind="voice", words=added)
@@ -223,6 +235,80 @@ class Listener:
 
         if self.cfg.output_mode in ("insert", "insert_show"):
             self._insert(command, wake_window)
+
+    # --- голосовой агент ------------------------------------------------------
+
+    def _agent_busy(self) -> bool:
+        return self._agent_thread is not None and self._agent_thread.is_alive()
+
+    def _route_to_agent(self, command, wake_window) -> bool:
+        """True — фраза относится к агенту (стоп, подтверждение или новая команда)."""
+        from . import agent as agent_mod
+
+        if self._agent_busy():
+            if agent_mod.is_stop_phrase(command, self.cfg):
+                log.info("Стоп-слово: прерываю агента")
+                self._agent.stop()
+                self._agent_answers.put("")   # разблокировать ожидание подтверждения
+                self._emit("agent", "stopped", "Остановлено стоп-словом")
+                self._emit_state(DONE, "агент остановлен")
+                return True
+            # агент ждёт подтверждения? любая фраза — ответ ему
+            self._agent_answers.put(command)
+            self._emit_state(DONE, command)
+            return True
+
+        if not self.cfg.get("agent_enabled", True):
+            return False
+        triggers = [self.cfg.get("agent_trigger", "сделай")] + \
+            list(self.cfg.get("agent_trigger_aliases", []))
+        task = strip_trigger(command, triggers)
+        if task is None:
+            return False
+        if not task:
+            self._emit("agent", "failed", "После «сделай» не услышал, что именно сделать")
+            self._emit_state(DONE, command)
+            return True
+
+        self.history.add(command, kind="voice", words=0)
+        self._start_agent(task)
+        self._emit_state(DONE, command)
+        return True
+
+    def _start_agent(self, task):
+        from . import agent as agent_mod, computer
+
+        problems = computer.check_requirements(self.cfg)
+        if problems:
+            for p in problems:
+                log.warning("Агент недоступен: %s", p)
+            self._emit("agent", "failed", " ".join(problems))
+            return
+
+        # очистить очередь ответов от мусора прошлых запусков
+        while not self._agent_answers.empty():
+            try:
+                self._agent_answers.get_nowait()
+            except queue.Empty:
+                break
+
+        def confirm() -> bool:
+            """Ждать голосовое подтверждение: следующая распознанная фраза — ответ."""
+            timeout = float(self.cfg.get("agent_confirm_timeout", 30))
+            try:
+                answer = self._agent_answers.get(timeout=timeout)
+            except queue.Empty:
+                return False
+            return agent_mod.is_confirm_phrase(answer, self.cfg)
+
+        self._agent = agent_mod.Agent(
+            self.cfg,
+            on_event=lambda stage, text: self._emit("agent", stage, text),
+            confirm=confirm)
+        self._agent_thread = threading.Thread(
+            target=self._agent.run, args=(task,), name="voicetool-agent", daemon=True)
+        self._agent_thread.start()
+        log.info("Агент запущен: %s", task)
 
     def _hotwords(self):
         """Подсказка модели из пользовательского словаря — или ничего."""

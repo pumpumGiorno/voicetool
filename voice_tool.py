@@ -2,6 +2,7 @@
 """Voice Tool — командная строка. Графическая версия: VoiceTool.py или VoiceTool.exe.
 
   python voice_tool.py listen          — слушать микрофон
+  python voice_tool.py agent           — голосовой агент: «Алиса, сделай ...» (нужен LLM API)
   python voice_tool.py file запись.mp4 — распознать файл (и перевести, если речь не русская)
   python voice_tool.py count | stats   — счётчик слов живого режима
   python voice_tool.py history         — последние распознанные фразы
@@ -158,6 +159,57 @@ def cmd_file(args, cfg):
     return 0
 
 
+def cmd_agent(args, cfg):
+    """Голосовой агент: выполняет команды на компьютере через LLM.
+
+    С текстом:  python voice_tool.py agent "открой блокнот"  — выполнить одну команду.
+    Без текста: живой режим, где «Алиса, сделай ...» запускает агента,
+                «Алиса, стоп» — прерывает (то же самое работает и в обычном listen/GUI).
+    """
+    from voicetool import agent as agent_mod, computer
+
+    problems = computer.check_requirements(cfg)
+    if problems:
+        for p in problems:
+            print(f"[Агент недоступен]: {p}", file=sys.stderr)
+        return 2
+
+    if args.command:  # текстовая команда — удобно проверять без микрофона
+        def confirm():
+            phrase = cfg.get("agent_confirm_phrase", "да подтверждаю")
+            answer = input(f"[Необратимое действие] Введите «{phrase}» для выполнения: ").strip()
+            return agent_mod.is_confirm_phrase(answer, cfg)
+
+        runner = agent_mod.Agent(cfg, on_event=lambda s, t: print(f"[{s}] {t}"), confirm=confirm)
+        status = runner.run(args.command)
+        print(f"[Лог]: {runner.log.path}")
+        return 0 if status == "done" else 1
+
+    # без текста — обычный живой режим (там агент уже встроен), просто с печатью событий
+    deps.require(["numpy", "faster_whisper", "sounddevice"])
+    from voicetool.engine import Listener
+
+    trigger = cfg.get("agent_trigger", "сделай")
+    print(f"[Агент] Говорите: «{cfg.wake_word}, {trigger} ...». "
+          f"Стоп-слово: «{cfg.wake_word}, {cfg.get('agent_stop_word', 'стоп')}». Ctrl+C — выход.")
+    done = __import__("threading").Event()
+    listener = Listener(cfg, events={
+        "state": lambda s, d: print(f"[{s}] {d}" if d else f"[{s}]"),
+        "recognized": lambda text, n: print(f"[Распознано]: {text}"),
+        "agent": lambda stage, text: print(f"[Агент {stage}] {text}"),
+        "error": lambda msg: print(f"[Ошибка]: {msg}", file=sys.stderr),
+    })
+    listener.start()
+    try:
+        while listener.running:
+            done.wait(0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        listener.stop()
+    return 0
+
+
 def cmd_count(args, cfg):
     print(f"[Счётчик слов]: {WordCounter(cfg.data_dir).total}")
     return 0
@@ -226,6 +278,11 @@ def build_parser():
     f.add_argument("--srt", help="сохранить субтитры SRT в указанный файл")
     f.add_argument("--vtt", help="сохранить субтитры WebVTT в указанный файл")
     f.set_defaults(func=cmd_file)
+
+    ag = sub.add_parser("agent", help="голосовой агент: выполнять команды на компьютере через LLM")
+    ag.add_argument("command", nargs="?",
+                    help="текст команды (без него — живой режим с микрофоном)")
+    ag.set_defaults(func=cmd_agent)
 
     sub.add_parser("count", help="показать счётчик слов").set_defaults(func=cmd_count)
     sub.add_parser("stats", help="статистика: всего / сегодня / за неделю").set_defaults(func=cmd_stats)

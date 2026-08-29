@@ -334,6 +334,174 @@ def test_quiet_split_avoids_cutting_speech():
     assert 20 * sr <= cut <= 26 * sr, f"разрез {cut / sr:.1f} с должен попасть в паузу"
 
 
+def test_agent_triggers():
+    from voicetool.text import matches_phrase, strip_trigger
+
+    triggers = ["сделай", "сделайте", "выполни"]
+    assert strip_trigger("сделай открой блокнот", triggers) == "открой блокнот"
+    assert strip_trigger("Сделай, открой Доту", triggers) == "открой Доту"
+    assert strip_trigger("зделай открой блокнот", triggers) == "открой блокнот", "ослышка Whisper"
+    assert strip_trigger("напомни мне купить молоко", triggers) is None, "обычная диктовка"
+    assert strip_trigger("", triggers) is None
+    # стоп-слово и подтверждение — нечёткие фразы
+    assert matches_phrase("стоп", "стоп")
+    assert matches_phrase("Алиса, стоп!", "стоп")
+    assert matches_phrase("да, подтверждаю", "да подтверждаю")
+    assert matches_phrase("да подтверждай", "да подтверждаю"), "ослышка"
+    assert not matches_phrase("нет, отмена", "да подтверждаю")
+    assert not matches_phrase("столб", "стоп")
+
+
+def test_agent_irreversible_detection():
+    from voicetool.agent import is_irreversible
+
+    assert is_irreversible("удали все файлы с рабочего стола")
+    assert is_irreversible("купи подписку")
+    assert is_irreversible("смени пароль")
+    assert is_irreversible("установи фотошоп")
+    assert not is_irreversible("открой блокнот")
+    assert not is_irreversible("зайди в телеграм и напиши сергею что опаздываю")
+
+
+class _FakeComputer:
+    """Компьютер для тестов: записывает вызовы, ничего не делает."""
+
+    class ComputerError(RuntimeError):
+        pass
+
+    def __init__(self, fail_open=False):
+        self.calls = []
+        self.fail_open = fail_open
+
+    def open_app(self, name):
+        self.calls.append(("open_app", name))
+        if self.fail_open:
+            from voicetool.computer import ComputerError
+            raise ComputerError(f"Программа {name!r} не найдена")
+        return f"запущен {name}"
+
+    def screenshot(self):
+        from voicetool.computer import ComputerError
+        raise ComputerError("нет экрана в тестах")
+
+    def type_text(self, text, press_enter=False):
+        self.calls.append(("type", text, press_enter))
+
+    def click(self, x, y, **kw):
+        self.calls.append(("click", x, y))
+        return x, y
+
+    def press_keys(self, combo):
+        self.calls.append(("key", combo))
+
+    def open_url(self, url):
+        self.calls.append(("open_url", url))
+        return f"открыто {url}"
+
+    def focus_window_by_title(self, title):
+        self.calls.append(("focus", title))
+        return title
+
+
+def _make_agent(tmp, replies, computer_mod, confirm=None, **cfg_extra):
+    from voicetool.agent import Agent
+
+    cfg = config.Config({**config.DEFAULTS, "data_dir": str(tmp),
+                         "agent_send_screenshots": False, **cfg_extra})
+    events = []
+    it = iter(replies)
+    agent = Agent(cfg, on_event=lambda s, t: events.append((s, t)), confirm=confirm,
+                  computer_mod=computer_mod, chat_fn=lambda msgs: next(it))
+    return agent, events
+
+
+def test_agent_loop_done_and_log():
+    with tempfile.TemporaryDirectory() as tmp:
+        comp = _FakeComputer()
+        agent, events = _make_agent(Path(tmp), [
+            '{"action": "open_app", "name": "notepad"}',
+            '```json\n{"action": "done", "message": "блокнот открыт"}\n```',
+        ], comp, agent_step_pause=0)
+        assert agent.run("открой блокнот") == "done"
+        assert ("open_app", "notepad") in comp.calls
+        log_text = (Path(tmp) / "agent_log.txt").read_text(encoding="utf-8")
+        assert "открой блокнот" in log_text and "итог" in log_text, "лог обязателен по ТЗ"
+        assert any(s == "done" for s, _ in events)
+
+
+def test_agent_step_limit_and_stop():
+    with tempfile.TemporaryDirectory() as tmp:
+        # модель зациклилась — лимит шагов должен остановить
+        comp = _FakeComputer()
+        agent, events = _make_agent(
+            Path(tmp), ['{"action": "wait", "seconds": 0.1}'] * 99, comp,
+            agent_max_steps=3, agent_step_pause=0)
+        assert agent.run("открой блокнот") == "failed"
+        assert any("лимит" in t for s, t in events if s == "failed")
+
+        # стоп-слово во время выполнения прерывает между шагами
+        from voicetool.agent import Agent
+
+        comp2 = _FakeComputer()
+        cfg2 = config.Config({**config.DEFAULTS, "data_dir": str(tmp), "agent_step_pause": 0,
+                              "agent_send_screenshots": False})
+        agent2 = Agent(cfg2, computer_mod=comp2, chat_fn=None)
+
+        def chat_and_stop(messages):
+            agent2.stop()  # пользователь сказал «Алиса, стоп» посреди работы
+            return '{"action": "wait", "seconds": 0.1}'
+
+        agent2.chat = chat_and_stop
+        assert agent2.run("открой блокнот") == "stopped"
+
+
+def test_agent_irreversible_requires_confirmation():
+    with tempfile.TemporaryDirectory() as tmp:
+        # без подтверждения — не выполняется вовсе
+        comp = _FakeComputer()
+        agent, events = _make_agent(Path(tmp), ['{"action": "done", "message": "x"}'],
+                                    comp, confirm=lambda: False, agent_step_pause=0)
+        assert agent.run("удали все файлы с рабочего стола") == "unconfirmed"
+        assert comp.calls == [], "ни одно действие не должно выполниться без подтверждения"
+
+        # с подтверждением — выполняется
+        comp2 = _FakeComputer()
+        agent2, _ = _make_agent(Path(tmp), ['{"action": "done", "message": "готово"}'],
+                                comp2, confirm=lambda: True, agent_step_pause=0)
+        assert agent2.run("удали все файлы с рабочего стола") == "done"
+
+        # модель пометила шаг необратимым — тоже требуется подтверждение
+        comp3 = _FakeComputer()
+        agent3, _ = _make_agent(Path(tmp), [
+            '{"action": "click", "x": 1, "y": 2, "irreversible": true}',
+        ], comp3, confirm=lambda: False, agent_step_pause=0)
+        assert agent3.run("нажми на кнопку") == "unconfirmed"
+        assert ("click", 1, 2) not in comp3.calls
+
+
+def test_agent_reports_failures():
+    with tempfile.TemporaryDirectory() as tmp:
+        # программа не найдена: ошибка уходит модели, модель честно отвечает fail
+        comp = _FakeComputer(fail_open=True)
+        agent, events = _make_agent(Path(tmp), [
+            '{"action": "open_app", "name": "несуществующая"}',
+            '{"action": "fail", "message": "программа не установлена"}',
+        ], comp, agent_step_pause=0)
+        assert agent.run("открой несуществующую программу") == "failed"
+        assert any("не установлена" in t for s, t in events if s == "failed")
+
+
+def test_agent_parse_action():
+    from voicetool.agent import _parse_action
+
+    assert _parse_action('{"action": "done", "message": "x"}') == {"action": "done", "message": "x"}
+    assert _parse_action('Вот ответ: {"action": "wait", "seconds": 2} — готово')["action"] == "wait"
+    assert _parse_action('```json\n{"action": "key", "combo": "enter"}\n```')["combo"] == "enter"
+    assert _parse_action("просто текст без JSON") is None
+    assert _parse_action('{"no_action": 1}') is None
+    assert _parse_action("") is None
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = []
