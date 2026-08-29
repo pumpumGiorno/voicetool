@@ -240,10 +240,14 @@ class SettingsPage(QWidget):
             lay.addWidget(box)
 
         self.fields["hotkey"] = QLineEdit()
-        self.fields["hotkey"].setPlaceholderText("Ctrl+Alt+A")
+        self.fields["hotkey"].setPlaceholderText("Ctrl+Alt+A или F8")
         form.addRow("Горячая клавиша", self.fields["hotkey"])
         self.hotkey_hint = label("", name="Dim", wrap=True)
         lay.addWidget(self.hotkey_hint)
+        lay.addWidget(label("Можно одну клавишу без модификаторов, например F8 или Insert. "
+                            "Одиночная буква или цифра будет перехватываться во всех программах — "
+                            "для букв лучше оставить сочетание вроде Ctrl+Alt+A.",
+                            name="Dim", wrap=True))
         self.fields["hotkey"].textChanged.connect(self._check_hotkey)
         return frame
 
@@ -282,7 +286,7 @@ class SettingsPage(QWidget):
             return
         ok = hotkey.parse(text) is not None
         self.hotkey_hint.setText(
-            "" if ok else "Не похоже на сочетание. Пример: Ctrl+Alt+A (модификатор обязателен).")
+            "" if ok else "Не похоже на клавишу. Примеры: F8, Insert, Ctrl+Alt+A.")
         self.hotkey_hint.setStyleSheet(f"color: {theme.WARN}; font-size: 11px;" if not ok else "")
 
     def load(self):
@@ -352,7 +356,7 @@ class SettingsPage(QWidget):
         values = self.collect()
         if self.fields["hotkey_enabled"].isChecked() and hotkey.parse(values["hotkey"]) is None:
             QMessageBox.warning(self, "Горячая клавиша",
-                                "Сочетание не распознано. Пример: Ctrl+Alt+A.")
+                                "Клавиша не распознана. Примеры: F8, Insert, Ctrl+Alt+A.")
             return
         # ключи, из-за которых слушателя надо перезапустить
         restart_keys = {"wake_word", "wake_word_aliases", "model", "wake_model", "device",

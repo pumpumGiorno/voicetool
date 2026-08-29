@@ -3,7 +3,9 @@ import re
 from difflib import SequenceMatcher
 
 WORD_RE = re.compile(r"[^\W\d_]+(?:[-'][^\W\d_]+)*|\d+", re.UNICODE)
-SIMILARITY = 0.82  # запас на то, что Whisper слышит "Алиса" как "Алис"/"Алиса,"
+# Запас на то, что Whisper слышит "Алиса" как "Алис"/"Алисо"/"Ализа".
+# 0.82 отбрасывал даже "алисо" (ratio ровно 0.80) — слово-триггер регулярно пролетал мимо.
+SIMILARITY = 0.75
 
 
 def count_words(text: str) -> int:

@@ -167,7 +167,9 @@ class Listener:
                     self._emit_state(WAITING if not self._paused.is_set() else PAUSED)
                     continue
 
-                audio = rec.record_utterance(self.cfg.wake_silence_seconds)
+                audio = rec.record_utterance(
+                    self.cfg.wake_silence_seconds,
+                    max_seconds=self.cfg.get("wake_max_seconds", 5.0))
                 if audio is None:
                     break                      # источник кадров кончился (файл)
                 if not len(audio) or self._interrupt():

@@ -208,7 +208,8 @@ def test_hotkey_parsing():
     mods, key = hotkey.parse("Ctrl+Alt+A")
     assert mods == hotkey.MOD_CONTROL | hotkey.MOD_ALT and key == ord("A")
     assert hotkey.parse("ctrl+shift+f5")[1] == 0x74
-    assert hotkey.parse("A") is None, "без модификатора нельзя: перехватит ввод во всей системе"
+    assert hotkey.parse("F8") == (0, 0x77), "одиночная клавиша разрешена (бинд на одну кнопку)"
+    assert hotkey.parse("A") == (0, ord("A")), "одиночная буква тоже разрешена"
     assert hotkey.parse("") is None
     assert hotkey.parse("Ctrl+Чепуха") is None
 
