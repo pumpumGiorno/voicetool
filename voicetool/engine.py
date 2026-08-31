@@ -52,7 +52,8 @@ class Listener:
         self.source = source            # путь к файлу вместо микрофона (демо и тесты)
         self.events = events or {}
         self.counter = WordCounter(cfg.data_dir)
-        self.history = History(cfg.data_dir)
+        self.history = History(
+            cfg.data_dir, enabled=bool(cfg.get("log_transcripts", True)))
         self.vocabulary = Vocabulary(cfg.data_dir)
 
         self._thread = None
@@ -86,8 +87,23 @@ class Listener:
         thread = self._thread
         if thread and thread.is_alive() and threading.current_thread() is not thread:
             thread.join(timeout=wait)
-        self._thread = None
+        stopped = not thread or not thread.is_alive()
+        if stopped:
+            self._thread = None
+        else:
+            log.warning("Listener не завершился за %.1f с", wait)
         self._emit_state(IDLE)
+        return stopped
+
+    def wait(self, timeout=None) -> bool:
+        """Wait for the listener worker without hiding a still-running thread."""
+        thread = self._thread
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout=timeout)
+        stopped = not thread or not thread.is_alive()
+        if stopped and self._thread is thread:
+            self._thread = None
+        return stopped
 
     def set_paused(self, value: bool):
         self._paused.set() if value else self._paused.clear()
@@ -213,10 +229,16 @@ class Listener:
                 hit, tail = find_wake_word(heard, wake_variants)
                 if not hit:
                     if heard:
-                        log.debug("Мимо: %s", heard)
+                        if self.cfg.get("log_transcripts", True):
+                            log.debug("Мимо: %s", heard)
+                        else:
+                            log.debug("Wake-фраза не совпала (%d символов)", len(heard))
                     continue
 
-                log.info("Слово-триггер: %r", heard)
+                if self.cfg.get("log_transcripts", True):
+                    log.info("Слово-триггер: %r", heard)
+                else:
+                    log.info("Слово-триггер распознан; текст не сохранён")
                 # окно запоминаем СРАЗУ: пока идёт распознавание, пользователь может уйти в другое
                 wake_window = _active_window(self.cfg)
                 self._emit_state(WAKE, heard)
@@ -245,7 +267,10 @@ class Listener:
             self._emit_state(DONE, "")
             return
 
-        log.info("Распознано: %s", command)
+        if self.cfg.get("log_transcripts", True):
+            log.info("Распознано: %s", command)
+        else:
+            log.info("Распознана фраза (%d символов); текст не сохранён", len(command))
         added = self.counter.add(command)
         self.history.add(command, kind="voice", words=added)
         if self.cfg.log_transcripts:

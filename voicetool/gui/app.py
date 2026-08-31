@@ -305,7 +305,7 @@ class VoiceToolApp:
                 "ollama_context", "max_agent_steps", "ollama_url"}:
             self.listener.reset_agent()
         if "reduce_animations" in changed:
-            self.floating._reduce_motion = bool(self.cfg.get("reduce_animations", False))
+            self.floating.set_reduce_motion(bool(self.cfg.get("reduce_animations", False)))
         self.files.apply_config(self.cfg)
         self.window.set_status("Настройки сохранены")
 
@@ -320,10 +320,15 @@ class VoiceToolApp:
 
     def quit(self):
         log.info("Выход")
+        timeout = max(0.5, float(self.cfg.get("shutdown_timeout_seconds", 6.0)))
         if self.hotkey_thread:
-            self.hotkey_thread.stop()
-        self.listener.stop()
-        self.files.cancel()
+            if not self.hotkey_thread.stop(wait=min(2.0, timeout)):
+                log.warning("Поток горячей клавиши не завершился до выхода")
+        self.listener.cancel_agent("Приложение закрывается")
+        if not self.listener.stop(wait=timeout):
+            log.warning("Фоновая voice/agent задача не завершилась до выхода")
+        if not self.files.cancel(wait=timeout):
+            log.warning("Фоновая файловая задача не завершилась до выхода")
         self.floating.hide()
         self.tray.hide()
         self.qapp.quit()

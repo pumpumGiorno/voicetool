@@ -29,6 +29,9 @@ class ConfirmationDialog(QDialog):
         tool = str(getattr(request, "tool", "") or "")
         if tool:
             root.addWidget(label(f"Действие: {tool}", name="Dim", wrap=True))
+        command = " ".join(str(getattr(request, "user_command", "") or "").split())
+        if command:
+            root.addWidget(label(f"Запрос пользователя: {command[:300]}", name="Muted", wrap=True))
         root.addWidget(label(
             "После подтверждения Alice выполнит это действие немедленно.",
             name="Danger", wrap=True))

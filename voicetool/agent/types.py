@@ -113,11 +113,14 @@ class AgentResult:
 class ConfirmationRequest:
     """One high-impact tool approval, asked immediately before execution."""
 
-    def __init__(self, tool, arguments, description, *, risk="high"):
+    def __init__(self, tool, arguments, description, *, risk="high", user_command=""):
         self.tool = str(tool)
         self.arguments = dict(arguments or {})
         self.description = str(description)
         self.risk = str(risk)
+        # Preserve the instruction that caused this exact approval.  Observed UI text is
+        # never substituted here, and the bound avoids retaining an unlimited transcript.
+        self.user_command = str(user_command or "")[:1000]
         self.created_at = time.time()
         self._event = threading.Event()
         self._approved: bool | None = None

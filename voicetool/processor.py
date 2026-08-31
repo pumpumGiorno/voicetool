@@ -31,11 +31,13 @@ def is_supported(path) -> bool:
 @dataclass
 class Job:
     path: Path
+    language_hint: str | None = None
     status: str = QUEUED
     progress: float = 0.0        # 0..1
     position: float = 0.0        # секунд обработано
     duration: float = 0.0
     language: str = ""
+    language_probability: float = 0.0
     text: str = ""
     translation: str = ""
     segments: list = field(default_factory=list)
@@ -86,7 +88,7 @@ class BatchProcessor:
 
     # --- очередь ------------------------------------------------------------
 
-    def add(self, paths):
+    def add(self, paths, language_hint=None):
         added = []
         with self._lock:
             known = {str(j.path) for j in self.jobs if j.status in (QUEUED, RUNNING)}
@@ -94,7 +96,8 @@ class BatchProcessor:
                 p = Path(p).expanduser()
                 if str(p) in known:
                     continue
-                job = Job(path=p, target=self.cfg.translate_to)
+                job = Job(path=p, target=self.cfg.translate_to,
+                          language_hint=language_hint)
                 if not p.exists():
                     job.status, job.error = FAILED, "Файл не найден"
                 elif not is_supported(p):
@@ -120,8 +123,20 @@ class BatchProcessor:
         self._thread = threading.Thread(target=self._run, name="voicetool-files", daemon=True)
         self._thread.start()
 
-    def cancel(self):
+    def cancel(self, wait=0.0):
         self._cancel.set()
+        return self.wait(wait) if wait and wait > 0 else not self.running
+
+    def wait(self, timeout=None) -> bool:
+        thread = self._thread
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout=timeout)
+        stopped = not thread or not thread.is_alive()
+        if stopped and self._thread is thread:
+            self._thread = None
+        if not stopped:
+            log.warning("Обработчик файлов не завершился за %.1f с", float(timeout or 0))
+        return stopped
 
     # --- работа -------------------------------------------------------------
 
@@ -141,7 +156,8 @@ class BatchProcessor:
         return None
 
     def _run(self):
-        history = History(self.cfg.data_dir)
+        history = History(
+            self.cfg.data_dir, enabled=bool(self.cfg.get("log_transcripts", True)))
         try:
             while not self._cancel.is_set():
                 job = self._next()
@@ -178,10 +194,12 @@ class BatchProcessor:
             job.progress = min(1.0, done / total) if total else 0.0
             self._emit("progress", job)
 
-        result = self._asr.transcribe_file(job.path, on_progress=progress,
+        result = self._asr.transcribe_file(job.path, language=job.language_hint,
+                                           on_progress=progress,
                                            should_stop=self._cancel.is_set,
                                            chunk_seconds=self.cfg.chunk_seconds)
         job.language = result["language"] or ""
+        job.language_probability = float(result.get("language_probability") or 0.0)
         job.duration = result["duration"] or job.duration
         job.text = result["text"]
         job.segments = result["segments"]

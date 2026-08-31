@@ -85,6 +85,7 @@ DEFAULTS = {
     "app_resolver_cache_seconds": 180,
     "allowed_url_schemes": [],   # custom schemes; http/https are always allowed
     "confirmation_timeout_seconds": 120.0,
+    "shutdown_timeout_seconds": 6.0,
 
     # --- интерфейс ---
     "show_floating_widget": True,
@@ -105,6 +106,7 @@ DEFAULTS = {
 # restore_clipboard — со времён, когда текст вставлялся через буфер обмена; теперь символы
 # набираются напрямую и буфер не используется вообще.
 OBSOLETE = {"restore_clipboard"}
+LEGACY_ALIASES = {"reduce_motion": "reduce_animations"}
 
 # Ключи, у которых сменилось значение по умолчанию. Если в файле лежит ровно старое
 # умолчание, пользователь его не выбирал — он просто получил его когда-то при создании
@@ -161,8 +163,13 @@ def load(path: Path = None) -> Config:
         try:
             user = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as e:
-            raise SystemExit(f"Ошибка в {path}: {e}\nПочините файл или удалите его — он ��оздастся заново.")
-        unknown = set(user) - set(DEFAULTS) - OBSOLETE
+            raise SystemExit(f"Ошибка в {path}: {e}\nПочините файл или удалите его — он создастся заново.")
+        if not isinstance(user, dict):
+            raise SystemExit(f"Ошибка в {path}: корень config.json должен быть объектом.")
+        for old, new in LEGACY_ALIASES.items():
+            if old in user and new not in user:
+                user[new] = user[old]
+        unknown = set(user) - set(DEFAULTS) - OBSOLETE - set(LEGACY_ALIASES)
         if unknown:
             log.warning("Неизвестные ключи в %s игнорируются: %s", path, ", ".join(sorted(unknown)))
         cfg.update({k: v for k, v in user.items() if k in DEFAULTS})

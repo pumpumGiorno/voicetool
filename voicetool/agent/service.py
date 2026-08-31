@@ -52,8 +52,9 @@ class DesktopAgentService:
             screen=screen, input_controller=self.automation)
         self.visual = visual or LocalVisionFallback(cfg, self.computer, self.provider)
         self.policy = policy or ConfirmationPolicy()
+        persist_activity = bool(cfg.get("log_transcripts", True))
         self.activity_log = activity_logger or ActivityLogger(
-            cfg.data_dir, include_command=bool(cfg.get("log_transcripts", True)))
+            cfg.data_dir, include_command=persist_activity, enabled=persist_activity)
         self.registry = ToolRegistry(
             self.automation, steam=self.steam, policy=self.policy,
             activity_logger=self.activity_log,

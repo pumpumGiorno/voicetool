@@ -117,6 +117,9 @@ class HotkeyThread(threading.Thread):
         self._ready.wait(timeout)
         return self.error
 
-    def stop(self):
+    def stop(self, wait=2.0):
         if IS_WINDOWS and self._tid:
             ctypes.windll.user32.PostThreadMessageW(self._tid, WM_QUIT, 0, 0)
+        if self.is_alive() and threading.current_thread() is not self:
+            self.join(timeout=max(0.0, float(wait)))
+        return not self.is_alive()

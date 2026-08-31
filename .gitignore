@@ -8,6 +8,8 @@ build-onefile/
 dist/
 *.spec.bak
 build_assets/
+/voicetool/_internal/
+/voicetool/VoiceTool.exe
 
 # скриншоты дымового теста интерфейса
 screenshots/

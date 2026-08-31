@@ -77,7 +77,8 @@ class ToolRegistry:
             result = ToolResult.fail(ErrorCode.INVALID_ARGUMENT, str(exc))
             return self._finish(call, result, started, command, confirmation)
 
-        needs_confirmation, reason = self.policy.needs_confirmation(call.name, arguments)
+        needs_confirmation, reason = self.policy.needs_confirmation(
+            call.name, arguments, user_command=command)
         if needs_confirmation:
             if confirm is None:
                 confirmation = "unavailable"
@@ -88,6 +89,7 @@ class ToolRegistry:
                 return self._finish(call, result, started, command, confirmation)
             request = ConfirmationRequest(
                 call.name, arguments, reason or f"Подтвердите действие {call.name}",
+                user_command=command,
             )
             try:
                 approved = bool(confirm(request))

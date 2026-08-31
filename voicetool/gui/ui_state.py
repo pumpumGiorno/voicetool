@@ -114,9 +114,12 @@ def recent_agent_activity(data_dir, limit=100) -> list[dict]:
     path = Path(data_dir) / "agent_activity.jsonl"
     if not path.exists():
         return []
+    from collections import deque
+
     rows = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()[-max(1, int(limit)):]
+        with path.open("r", encoding="utf-8") as handle:
+            lines = deque(handle, maxlen=max(1, int(limit)))
     except OSError:
         return []
     for line in reversed(lines):

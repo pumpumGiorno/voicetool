@@ -26,6 +26,18 @@ from .types import ErrorCode, ToolResult
 
 IS_WINDOWS = os.name == "nt" and hasattr(ctypes, "windll")
 
+# Opening a file delegates to its registered Windows handler.  Executable/script/project
+# formats are intentionally absent: an agent may reveal those with show_in_folder, but it
+# must not launch them through a supposedly low-risk document operation.
+SAFE_OPEN_FILE_EXTENSIONS = {
+    ".txt", ".md", ".log", ".rtf", ".pdf", ".doc", ".docx", ".odt",
+    ".xls", ".xlsx", ".ods", ".csv", ".ppt", ".pptx", ".odp",
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".svg",
+    ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".wma",
+    ".mp4", ".mkv", ".avi", ".mov", ".webm", ".wmv", ".m4v",
+    ".zip", ".7z", ".rar", ".json", ".yaml", ".yml", ".xml",
+}
+
 
 @dataclass(frozen=True)
 class AppCandidate:
@@ -785,6 +797,16 @@ class DesktopController:
         target = Path(str(path or "")).expanduser()
         if not target.exists() or (directory and not target.is_dir()) or (not directory and not target.is_file()):
             return ToolResult.fail(ErrorCode.FILE_NOT_FOUND, f"Путь не найден: {path}")
+        try:
+            target = target.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            return ToolResult.fail(ErrorCode.ACCESS_DENIED, f"Небезопасный путь: {exc}")
+        if not directory and target.suffix.casefold() not in SAFE_OPEN_FILE_EXTENSIONS:
+            return ToolResult.fail(
+                ErrorCode.ACCESS_DENIED,
+                "Этот тип файла нельзя запускать через open_file; используйте show_in_folder",
+                data={"path": str(target)},
+            )
         if not IS_WINDOWS and self._starter is None:
             return _unsupported("Открытие файлов и папок")
         try:

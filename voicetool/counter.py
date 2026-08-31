@@ -1,10 +1,16 @@
 """Счётчик слов и логи. Данные лежат отдельно от кода и переживают обновление программы."""
 import json
 import os
+import threading
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from .text import count_words
+from .retention import append_bounded
+
+TRANSCRIPT_LOG_MAX_LINES = 5_000
+TRANSCRIPT_LOG_MAX_BYTES = 5 * 1024 * 1024
+_transcript_lock = threading.Lock()
 
 
 class WordCounter:
@@ -91,8 +97,13 @@ class WordCounter:
 
 
 def append_log(data_dir: Path, line: str, name="transcripts.log"):
-    with open(Path(data_dir) / name, "a", encoding="utf-8") as f:
-        f.write(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {line}\n")
+    append_bounded(
+        Path(data_dir) / name,
+        f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {line}",
+        max_lines=TRANSCRIPT_LOG_MAX_LINES,
+        max_bytes=TRANSCRIPT_LOG_MAX_BYTES,
+        lock=_transcript_lock,
+    )
 
 
 def save_transcript(data_dir: Path, source: str, body: str) -> Path:

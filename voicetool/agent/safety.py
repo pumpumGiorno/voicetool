@@ -30,7 +30,8 @@ class ConfirmationPolicy:
         "dangerous_system_change", "purchase", "financial_action", "transfer_money",
     }
 
-    def classify(self, tool: str, arguments: dict | None = None) -> tuple[Risk, str]:
+    def classify(self, tool: str, arguments: dict | None = None, *,
+                 user_command: str = "") -> tuple[Risk, str]:
         name = str(tool or "").strip().casefold()
         arguments = arguments or {}
         if name in self.HIGH_IMPACT:
@@ -40,16 +41,17 @@ class ConfirmationPolicy:
         if any(str(key).casefold() in {"enter", "return"} for key in keys):
             return Risk.HIGH, "Клавиша может отправить или подтвердить внешнее действие."
         if name in {"invoke_ui_element", "visual_interact"} and re.search(
-            r"send|submit|publish|purchase|buy|delete|install|отправ|опубликов|"
+            r"send|submit|publish|purchase|buy|delete|install|отправ|опублик|опублику|"
             r"купить|удалить|установить|подтверд",
-            " ".join(str(arguments.get(key, ""))
-                     for key in ("name", "target", "expected_result")), re.I,
+            " ".join([str(user_command or ""), *(str(arguments.get(key, ""))
+                     for key in ("name", "target", "expected_result"))]), re.I,
         ):
             return Risk.HIGH, "UI action может выполнить внешнее или необратимое действие."
         return Risk.LOW, ""
 
-    def needs_confirmation(self, tool: str, arguments: dict | None = None) -> tuple[bool, str]:
-        risk, reason = self.classify(tool, arguments)
+    def needs_confirmation(self, tool: str, arguments: dict | None = None, *,
+                           user_command: str = "") -> tuple[bool, str]:
+        risk, reason = self.classify(tool, arguments, user_command=user_command)
         return risk >= Risk.HIGH, reason
 
 

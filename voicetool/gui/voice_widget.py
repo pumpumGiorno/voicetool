@@ -32,6 +32,8 @@ MARGIN = 24          # отступ от угла экрана
 ORB = 62             # диаметр круга
 CARD_W, CARD_H = 320, 122
 RESULT_MS = 4200     # сколько показывать распознанный текст
+ANIMATED_STATES = {"wake", "recording", "thinking", "understanding", "executing",
+                   "waiting_confirmation"}
 
 
 class FloatingWidget(QWidget):
@@ -158,6 +160,14 @@ class FloatingWidget(QWidget):
     def fade_out(self):
         """Вернуться к минимальному состоянию, если слушаем, иначе исчезнуть совсем."""
         self._hide_timer.stop()
+        self._pulse.stop()
+        if self._reduce_motion:
+            self._card = 0.0
+            self._grow = 0.0
+            self._state = "idle"
+            self.setWindowOpacity(0.55)
+            self.update()
+            return
         self._card_anim.stop()
         self._card_anim.setStartValue(self._card)
         self._card_anim.setEndValue(0.0)
@@ -173,6 +183,10 @@ class FloatingWidget(QWidget):
         """Полностью убрать (микрофон выключен)."""
         self._hide_timer.stop()
         self._pulse.stop()
+        if self._reduce_motion:
+            self._fade.stop()
+            self.hide()
+            return
         self._fade.stop()
         self._fade.setStartValue(self.windowOpacity())
         self._fade.setEndValue(0.0)
@@ -184,9 +198,19 @@ class FloatingWidget(QWidget):
     def push_level(self, level: float):
         self._level = min(1.0, level * 14)
 
+    def set_reduce_motion(self, value):
+        self._reduce_motion = bool(value)
+        if self._reduce_motion:
+            self._pulse.stop()
+            self._fade.stop()
+            self._grow_anim.stop()
+            self._card_anim.stop()
+            self.update()
+
     def _set_state(self, state, grow, card):
         self._state = state
         if self._reduce_motion:
+            self._pulse.stop()
             self._grow = grow
             self._card = card
             self.update()
@@ -197,10 +221,19 @@ class FloatingWidget(QWidget):
             anim.setStartValue(current)
             anim.setEndValue(target)
             anim.start()
-        if not self._pulse.isActive() and not self._reduce_motion:
+        if state in ANIMATED_STATES and not self._pulse.isActive() and not self._reduce_motion:
             self._pulse.start()
+        elif state not in ANIMATED_STATES:
+            self._pulse.stop()
 
     def _fade_in(self, opacity):
+        if self._reduce_motion:
+            self._fade.stop()
+            self.setWindowOpacity(opacity)
+            if not self.isVisible():
+                self.show()
+                self.raise_()
+            return
         if not self.isVisible():
             self.setWindowOpacity(0.0)
             self.show()

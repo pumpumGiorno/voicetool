@@ -6,7 +6,9 @@
   tools/test_live_pipeline.py — «Алиса» -> распознавание -> счётчик -> вставка
 """
 import json
+import sys
 import tempfile
+import types
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -276,7 +278,14 @@ def test_model_prefers_local_cache():
     (local_files_only=True) и только при её отсутствии идёт в сеть. Заодно проверяем,
     что неудачная попытка GPU запоминается и CUDA не пробуется по второму разу.
     """
-    import faster_whisper
+    try:
+        import faster_whisper
+    except ImportError:
+        # This test replaces the model class completely; keep the advertised
+        # dependency-free pipeline suite dependency-free on Linux CI.
+        faster_whisper = types.ModuleType("faster_whisper")
+        faster_whisper.WhisperModel = object
+        sys.modules["faster_whisper"] = faster_whisper
 
     from voicetool import asr as asr_module
     from voicetool import cuda as cuda_module
