@@ -10,16 +10,18 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QSharedMemory, Qt, QTimer
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from .. import config, engine, hotkey, logs, paths
 from ..counter import WordCounter
 from ..processor import DONE, FAILED, SUPPORTED
 from . import theme
 from .bridge import ListenerBridge, ProcessorBridge
+from .dialogs import ConfirmationDialog
 from .main_window import MainWindow
 from .page_check import open_path
 from .tray import Tray
+from .ui_state import recent_agent_activity
 from .voice_widget import FloatingWidget
 from .widgets import app_icon
 
@@ -33,7 +35,7 @@ class VoiceToolApp:
         self.source = source   # файл вместо микрофона: демонстрация и автотесты
         self.window = MainWindow(cfg)
         self.tray = Tray(qapp)
-        self.floating = FloatingWidget()
+        self.floating = FloatingWidget(cfg.get("reduce_animations", False))
         self.listener = ListenerBridge(cfg, qapp, source=source)
         self.files = ProcessorBridge(cfg, qapp)
         self.hotkey_thread = None
@@ -53,6 +55,9 @@ class VoiceToolApp:
         home.listen_toggled.connect(self.set_listening)
         home.files_dropped.connect(self.add_files)
         home.browse_clicked.connect(self.window.pages["files"]._browse)
+        home.command_submitted.connect(self.execute_typed_command)
+        home.cancel_requested.connect(
+            lambda: self.listener.cancel_agent("Остановлено пользователем"))
         self.window.quit_requested.connect(self.quit)
         self.window.closed_to_tray.connect(
             lambda: self.tray.notify("Voice Tool работает в фоне",
@@ -64,6 +69,7 @@ class VoiceToolApp:
         settings = self.window.pages["settings"]
         settings.saved.connect(self.on_settings_saved)
         settings.restart_listener.connect(self.restart_listener)
+        self.window.pages["agent"].settings_changed.connect(self.on_settings_saved)
 
         files_page = self.window.pages["files"]
         files_page.add_requested.connect(self.add_files)
@@ -85,6 +91,10 @@ class VoiceToolApp:
         self.listener.counter.connect(self.on_counter)
         self.listener.status.connect(self.window.set_status)
         self.listener.error.connect(self.on_error)
+        self.listener.agent_event.connect(self.on_agent_event)
+        self.listener.agent_result.connect(self.on_agent_result)
+        self.listener.confirmation.connect(self.on_confirmation)
+        self.listener.command_finished.connect(self.on_command_result)
 
     def _wire_files(self):
         page = self.window.pages["files"]
@@ -112,7 +122,6 @@ class VoiceToolApp:
     def restart_listener(self):
         was = self.listener.running
         self.listener.apply_config(self.cfg, source=self.source)
-        self._wire_listener()
         if was:
             self.listener.start()
 
@@ -157,6 +166,10 @@ class VoiceToolApp:
             self.floating.show_recording()
         elif state == engine.THINKING:
             self.floating.show_thinking()
+        elif state in (engine.UNDERSTANDING, engine.EXECUTING,
+                       engine.WAITING_CONFIRMATION, engine.SUCCESS,
+                       engine.ERROR, engine.CANCELLED):
+            self.floating.show_agent_state(state, detail)
         elif state in (engine.IDLE, engine.PAUSED):
             self.floating.dismiss()
 
@@ -173,6 +186,47 @@ class VoiceToolApp:
         page = self.window.pages["history"]
         if self.window.stack.currentWidget() is page:
             page.refresh()
+
+    def execute_typed_command(self, command):
+        self.window.pages["home"].set_last(command)
+        self.window.pages["home"].set_state(engine.UNDERSTANDING, "Проверяю команду…")
+        if self.cfg.show_floating_widget:
+            self.floating.show_agent_state(engine.UNDERSTANDING, "Проверяю команду…")
+        self.listener.execute_command(command)
+
+    def on_agent_event(self, event):
+        self.window.pages["home"].set_agent_event(event)
+        self.window.pages["agent"].set_agent_state(event.status)
+        if self.cfg.show_floating_widget:
+            self.floating.show_agent_state(event.status, event.message)
+        if getattr(event.status, "value", "") in {"success", "error", "cancelled"}:
+            self.refresh_activity()
+
+    def on_agent_result(self, result):
+        self.on_command_result(result)
+
+    def on_command_result(self, result):
+        if result is None:
+            return
+        if getattr(result, "handled", False):
+            self.window.pages["home"].set_state(result.status, result.message)
+            if self.cfg.show_floating_widget:
+                self.floating.show_agent_state(result.status, result.message)
+        else:
+            self.window.pages["home"].set_state(engine.SUCCESS, "Команда распознана как диктовка")
+        self.refresh_activity()
+
+    def on_confirmation(self, request):
+        dialog = ConfirmationDialog(request, self.window if self.window.isVisible() else None)
+        approved = dialog.exec() == QDialog.DialogCode.Accepted
+        if not self.listener.resolve_confirmation(approved):
+            request.resolve(approved)
+
+    def refresh_activity(self):
+        rows = recent_agent_activity(self.cfg.data_dir, 12)
+        self.window.pages["home"].set_activity(rows)
+        if self.window.stack.currentWidget() is self.window.pages["history"]:
+            self.window.pages["history"].refresh()
 
     def on_counter(self, total, added):
         self.refresh_counter()
@@ -239,12 +293,19 @@ class VoiceToolApp:
         page = self.window.pages["stats"]
         if self.window.stack.currentWidget() is page:
             page.refresh()
+        self.refresh_activity()
 
     def on_settings_saved(self, changed):
         if "hotkey" in changed or "hotkey_enabled" in changed:
             self.apply_hotkey()
         if not self.cfg.show_floating_widget:
             self.floating.dismiss()
+        if set(changed) & {
+                "agent_enabled", "strict_local_ai", "vision_enabled", "ollama_model",
+                "ollama_context", "max_agent_steps", "ollama_url"}:
+            self.listener.reset_agent()
+        if "reduce_animations" in changed:
+            self.floating.set_reduce_motion(bool(self.cfg.get("reduce_animations", False)))
         self.files.apply_config(self.cfg)
         self.window.set_status("Настройки сохранены")
 
@@ -259,10 +320,15 @@ class VoiceToolApp:
 
     def quit(self):
         log.info("Выход")
+        timeout = max(0.5, float(self.cfg.get("shutdown_timeout_seconds", 6.0)))
         if self.hotkey_thread:
-            self.hotkey_thread.stop()
-        self.listener.stop()
-        self.files.cancel()
+            if not self.hotkey_thread.stop(wait=min(2.0, timeout)):
+                log.warning("Поток горячей клавиши не завершился до выхода")
+        self.listener.cancel_agent("Приложение закрывается")
+        if not self.listener.stop(wait=timeout):
+            log.warning("Фоновая voice/agent задача не завершилась до выхода")
+        if not self.files.cancel(wait=timeout):
+            log.warning("Фоновая файловая задача не завершилась до выхода")
         self.floating.hide()
         self.tray.hide()
         self.qapp.quit()

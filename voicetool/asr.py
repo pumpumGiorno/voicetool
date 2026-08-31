@@ -84,6 +84,11 @@ class ASR:
         root = self.cfg.models_dir  # None = кэш HuggingFace по умолчанию
         kwargs = dict(device=device, compute_type=self.compute_type or self.cfg.compute_type,
                       download_root=str(root) if root else None)
+        if device == "cpu":
+            # CTranslate2 по умолчанию берёт 4 потока; на многоядерном процессоре
+            # это оставляет большую часть машины простаивать. 0 в настройках = все ядра.
+            threads = int(self.cfg.get("cpu_threads", 0) or 0)
+            kwargs["cpu_threads"] = threads if threads > 0 else (os.cpu_count() or 4)
         try:
             return WhisperModel(self.model_size, local_files_only=True, **kwargs)
         except Exception as e:
@@ -177,7 +182,7 @@ class ASR:
 
     def transcribe_file(self, path, language=None, on_progress=None, should_stop=None,
                         chunk_seconds=None):
-        """Файл любой длины -> {language, language_probability, duration, text, segments}.
+        """Фай�� любой длины -> {language, language_probability, duration, text, segments}.
 
         Файл читается кусками (см. media.audio_chunks), поэтому память не растёт с длиной
         записи. Язык определяется по первому куску и дальше фиксируется — иначе на длинной

@@ -4,6 +4,9 @@ Listener и BatchProcessor живут в своих потоках и зовут
 из чужого потока нельзя, поэтому колбэки превращаются здесь в сигналы: Qt сам перекинет
 их в поток интерфейса (очередь событий).
 """
+import threading
+import time
+
 from PySide6.QtCore import QObject, Signal
 
 from ..engine import Listener
@@ -18,9 +21,15 @@ class ListenerBridge(QObject):
     counter = Signal(int, int)      # всего, добавлено
     status = Signal(str)
     error = Signal(str)
+    agent_event = Signal(object)
+    agent_result = Signal(object)
+    confirmation = Signal(object)
+    command_finished = Signal(object)
 
     def __init__(self, cfg, parent=None, source=None):
         super().__init__(parent)
+        self._command_threads = set()
+        self._command_lock = threading.Lock()
         self.listener = Listener(cfg, source=source, events={
             "state": self.state.emit,
             "level": self.level.emit,
@@ -29,20 +38,62 @@ class ListenerBridge(QObject):
             "counter": self.counter.emit,
             "status": self.status.emit,
             "error": self.error.emit,
+            "agent_event": self.agent_event.emit,
+            "agent_result": self.agent_result.emit,
+            "confirmation": self.confirmation.emit,
         })
 
     # тонкие обёртки, чтобы окна не лезли внутрь Listener
     def start(self):
         self.listener.start()
 
-    def stop(self):
-        self.listener.stop()
+    def stop(self, wait=6.0):
+        listener_stopped = self.listener.stop(wait=wait)
+        return listener_stopped and self.wait_for_commands(wait)
 
     def trigger(self):
         return self.listener.trigger()
 
     def set_paused(self, value):
         self.listener.set_paused(value)
+
+    def execute_command(self, command):
+        """Run a typed command off the Qt thread through the existing agent service."""
+        text = str(command or "").strip()
+        if not text:
+            return
+
+        def run():
+            try:
+                result = self.listener.execute_agent(text)
+                self.command_finished.emit(result)
+            finally:
+                with self._command_lock:
+                    self._command_threads.discard(threading.current_thread())
+
+        thread = threading.Thread(target=run, name="voicetool-ui-agent", daemon=True)
+        with self._command_lock:
+            self._command_threads.add(thread)
+        thread.start()
+
+    def wait_for_commands(self, timeout=6.0):
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        with self._command_lock:
+            threads = list(self._command_threads)
+        for thread in threads:
+            if thread is not threading.current_thread():
+                thread.join(max(0.0, deadline - time.monotonic()))
+        with self._command_lock:
+            return not any(thread.is_alive() for thread in self._command_threads)
+
+    def cancel_agent(self, reason="Остановлено пользователем"):
+        return self.listener.cancel_agent(reason)
+
+    def resolve_confirmation(self, approved):
+        return self.listener.resolve_agent_confirmation(approved)
+
+    def reset_agent(self):
+        self.listener.reset_agent()
 
     @property
     def running(self):
@@ -56,11 +107,13 @@ class ListenerBridge(QObject):
         """Настройки применяются к работающему слушателю перезапуском: модель могла смениться."""
         was_running = self.running
         if was_running:
-            self.stop()
+            if not self.stop():
+                return False
         self.listener = Listener(cfg, source=source or self.listener.source,
                                  events=self.listener.events)
         if was_running:
             self.start()
+        return True
 
 
 class ProcessorBridge(QObject):
@@ -87,8 +140,8 @@ class ProcessorBridge(QObject):
     def start(self):
         self.processor.start()
 
-    def cancel(self):
-        self.processor.cancel()
+    def cancel(self, wait=0.0):
+        return self.processor.cancel(wait=wait)
 
     def clear_finished(self):
         self.processor.clear_finished()

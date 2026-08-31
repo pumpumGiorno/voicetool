@@ -18,16 +18,28 @@ HOTKEY_ID = 1
 
 MODIFIERS = {"ctrl": MOD_CONTROL, "control": MOD_CONTROL, "alt": MOD_ALT,
              "shift": MOD_SHIFT, "win": MOD_WIN, "meta": MOD_WIN}
+VK_LWIN = 0x5B
 NAMED_KEYS = {
     "space": 0x20, "enter": 0x0D, "return": 0x0D, "tab": 0x09, "esc": 0x1B, "escape": 0x1B,
     "insert": 0x2D, "delete": 0x2E, "home": 0x24, "end": 0x23, "pgup": 0x21, "pgdn": 0x22,
+    "pageup": 0x21, "pagedown": 0x22,
     "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27, "backspace": 0x08,
+    "pause": 0x13, "capslock": 0x14, "numlock": 0x90, "scrolllock": 0x91,
+    "printscreen": 0x2C, "prtsc": 0x2C, "apps": 0x5D, "menu": 0x5D,
+    # клавиша Windows как самостоятельная кнопка (не как модификатор в сочетании)
+    "lwin": VK_LWIN, "rwin": 0x5C,
     **{f"f{i}": 0x6F + i for i in range(1, 25)},
+    **{f"num{i}": 0x60 + i for i in range(10)},
 }
 
 
 def parse(combo: str):
-    """"Ctrl+Alt+A" -> (модификаторы, код клавиши). None, если разобрать не вышло."""
+    """"Ctrl+Alt+A" или просто "F8" -> (модификаторы, код клавиши). None, если разобрать не вышло.
+
+    Одиночная клавиша разрешена: удобно вешать активацию на F-клавишу или Insert.
+    Помните, что одиночная буква/цифра будет перехвачена во всей системе — для них
+    лучше оставлять модификатор, а без модификатора использовать F1-F24 и подобные.
+    """
     if not combo:
         return None
     mods, key = 0, None
@@ -35,6 +47,8 @@ def parse(combo: str):
         part = part.strip().lower()
         if not part:
             continue
+        if part == "windows":
+            part = "win"  # "Windows" — привычное написание клавиши Win
         if part in MODIFIERS:
             mods |= MODIFIERS[part]
         elif part in NAMED_KEYS:
@@ -43,8 +57,12 @@ def parse(combo: str):
             key = ord(part.upper())
         else:
             return None
-    if key is None or mods == 0:
-        return None  # без модификатора глобальная клавиша перехватит ввод во всей системе
+    if key is None:
+        if mods == MOD_WIN:
+            # одиночная "Win"/"Windows": это не сочетание, а сама клавиша Windows.
+            # Меню «Пуск» при этом всё равно откроется — Windows обрабатывает её сама.
+            return 0, VK_LWIN
+        return None
     return mods, key
 
 
@@ -99,6 +117,9 @@ class HotkeyThread(threading.Thread):
         self._ready.wait(timeout)
         return self.error
 
-    def stop(self):
+    def stop(self, wait=2.0):
         if IS_WINDOWS and self._tid:
             ctypes.windll.user32.PostThreadMessageW(self._tid, WM_QUIT, 0, 0)
+        if self.is_alive() and threading.current_thread() is not self:
+            self.join(timeout=max(0.0, float(wait)))
+        return not self.is_alive()

@@ -10,6 +10,8 @@ from datetime import date, datetime
 from pathlib import Path
 
 KEEP_DAYS = 30
+MAX_LOG_BYTES = 5 * 1024 * 1024
+LOG_BACKUPS = 2
 _configured = False
 
 
@@ -26,7 +28,8 @@ def setup(data_dir: Path, level=logging.INFO, console=True) -> Path:
     root.setLevel(level)
     fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(name)-18s %(message)s",
                             datefmt="%H:%M:%S")
-    handler = logging.FileHandler(path, encoding="utf-8")
+    handler = logging.handlers.RotatingFileHandler(
+        path, maxBytes=MAX_LOG_BYTES, backupCount=LOG_BACKUPS, encoding="utf-8")
     handler.setFormatter(fmt)
     root.addHandler(handler)
     if console and sys.stderr:
@@ -47,7 +50,7 @@ def today_log(data_dir: Path) -> Path:
 
 def _cleanup(log_dir: Path):
     """Старые логи чистим сами: иначе за год накопится триста файлов."""
-    for old in log_dir.glob("*.log"):
+    for old in log_dir.glob("*.log*"):
         try:
             age = (datetime.now() - datetime.fromtimestamp(old.stat().st_mtime)).days
             if age > KEEP_DAYS:

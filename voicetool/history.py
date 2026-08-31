@@ -7,18 +7,28 @@ kind = "voice" (живой режим, идёт в счётчик слов) | "f
 """
 import json
 import logging
+import threading
 from collections import deque
 from datetime import datetime
 from pathlib import Path
 
+from .retention import append_bounded, trim_lines
+
 log = logging.getLogger(__name__)
 
-MAX_LINES = 20_000  # дальше подрезаем: файл не должен расти бесконечно
+MAX_LINES = 10_000
+MAX_BYTES = 8 * 1024 * 1024
 
 
 class History:
-    def __init__(self, data_dir: Path):
+    def __init__(self, data_dir: Path, *, enabled=True, max_lines=MAX_LINES,
+                 max_bytes=MAX_BYTES):
         self.path = Path(data_dir) / "history.jsonl"
+        self.enabled = bool(enabled)
+        self.max_lines = max(1, int(max_lines))
+        self.max_bytes = max(1024, int(max_bytes))
+        self._lock = threading.Lock()
+        trim_lines(self.path, max_lines=self.max_lines, max_bytes=self.max_bytes, force=True)
 
     def add(self, text: str, kind="voice", words=0, source=None, language=None):
         entry = {
@@ -31,9 +41,13 @@ class History:
             entry["source"] = str(source)
         if language:
             entry["language"] = language
+        if not self.enabled:
+            return entry
         try:
-            with open(self.path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            append_bounded(
+                self.path, json.dumps(entry, ensure_ascii=False),
+                max_lines=self.max_lines, max_bytes=self.max_bytes, lock=self._lock,
+            )
         except OSError as e:
             log.error("Не удалось записать историю: %s", e)
         return entry
@@ -69,17 +83,9 @@ class History:
         except OSError as e:
             log.error("Не удалось очистить историю: %s", e)
 
-    def trim(self, keep=MAX_LINES):
-        """Оставить последние keep записей. Вызывается при старте приложения."""
-        if not self.path.exists():
-            return
-        try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                lines = deque(f, maxlen=keep + 1)
-            if len(lines) <= keep:
-                return
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text("".join(list(lines)[-keep:]), encoding="utf-8")
-            tmp.replace(self.path)
-        except OSError as e:
-            log.error("Не удалось подрезать историю: %s", e)
+    def trim(self, keep=None):
+        """Force retention now; normal writes enforce the same byte bound automatically."""
+        return trim_lines(
+            self.path, max_lines=keep or self.max_lines,
+            max_bytes=self.max_bytes, force=True,
+        )

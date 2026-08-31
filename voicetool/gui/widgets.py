@@ -1,13 +1,37 @@
 """Мелкие переиспользуемые виджеты и рисованная иконка приложения."""
 import math
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Property, QPropertyAnimation
-from PySide6.QtGui import (QColor, QFont, QIcon, QLinearGradient, QPainter, QPainterPath,
-                           QPen, QPixmap)
-from PySide6.QtWidgets import (QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel,
-                               QSizePolicy, QVBoxLayout, QWidget)
+from PySide6.QtCore import (
+    Property,
+    QEasingCurve,
+    QPointF,
+    QPropertyAnimation,
+    QRectF,
+    Qt,
+)
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QIcon,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+)
+from PySide6.QtWidgets import (
+    QFrame,
+    QGraphicsDropShadowEffect,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 from . import theme
+from .ui_state import AliceState, normalize_state
 
 
 def card(*, padding=18, spacing=12, name="Card") -> tuple:
@@ -128,7 +152,7 @@ class BarChart(QWidget):
                 p.drawText(QRectF(x, rect.top() - 15, width, 14), Qt.AlignCenter, str(count))
 
 
-class LevelMeter(QWidget):
+class VoiceWaveform(QWidget):
     """Полоски-эквалайзер: показывают, что микрофон реально слышит звук."""
 
     BARS = 24
@@ -165,19 +189,26 @@ class LevelMeter(QWidget):
             p.fillPath(path, color)
 
 
-class MicOrb(QWidget):
-    """Круглый индикатор состояния на главном экране: пульсирует, когда идёт запись."""
+class AliceCore(QWidget):
+    """Reusable, audio-reactive Alice state visual.
+
+    It uses lightweight painted arcs rather than blur or particles. Ambient animation
+    stops whenever the widget is hidden or reduced motion is enabled.
+    """
 
     def __init__(self, size=118):
         super().__init__()
         self.setFixedSize(size, size)
         self._phase = 0.0
-        self._active = False
+        self._state = AliceState.IDLE
+        self._amplitude = 0.0
+        self._reduce_motion = False
         self._anim = QPropertyAnimation(self, b"phase", self)
         self._anim.setStartValue(0.0)
         self._anim.setEndValue(1.0)
-        self._anim.setDuration(1600)
+        self._anim.setDuration(1800)
         self._anim.setLoopCount(-1)
+        self._anim.setEasingCurve(QEasingCurve.InOutSine)
 
     def get_phase(self):
         return self._phase
@@ -188,38 +219,182 @@ class MicOrb(QWidget):
 
     phase = Property(float, get_phase, set_phase)
 
-    def set_active(self, active: bool):
-        if active == self._active:
+    def set_state(self, state, *, reduce_motion=None):
+        state = normalize_state(state)
+        if reduce_motion is not None:
+            self._reduce_motion = bool(reduce_motion)
+        if state == self._state and reduce_motion is None:
             return
-        self._active = active
-        self._anim.start() if active else self._anim.stop()
+        self._state = state
+        animated = state in {
+            AliceState.LISTENING, AliceState.PROCESSING, AliceState.EXECUTING,
+            AliceState.WAITING_CONFIRMATION,
+        }
+        if animated and not self._reduce_motion and self.isVisible():
+            self._anim.start()
+        else:
+            self._anim.stop()
         self.update()
+
+    def set_active(self, active: bool):
+        """Compatibility with the pre-Stage-5 home page."""
+        self.set_state(AliceState.LISTENING if active else AliceState.IDLE)
+
+    def set_amplitude(self, level: float):
+        self._amplitude = max(0.0, min(1.0, float(level) * 13.0))
+        if self._state == AliceState.LISTENING:
+            self.update()
+
+    def hideEvent(self, event):
+        self._anim.stop()
+        super().hideEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.set_state(self._state, reduce_motion=self._reduce_motion)
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         c = QPointF(self.width() / 2, self.height() / 2)
-        base = min(self.width(), self.height()) / 2 - 12
+        base = min(self.width(), self.height()) / 2 - 14
+        color = QColor(theme.state_color(self._state.value))
+        active = self._state not in {
+            AliceState.IDLE, AliceState.SUCCESS, AliceState.ERROR, AliceState.CANCELLED,
+        }
 
-        if self._active:
-            for k in range(3):
-                t = (self._phase + k / 3.0) % 1.0
-                r = base * (0.72 + 0.5 * t)
-                color = QColor(theme.ACCENT)
-                color.setAlphaF(max(0.0, 0.32 * (1 - t)))
-                p.setPen(QPen(color, 2))
-                p.drawEllipse(c, r, r)
+        if active:
+            pulse = 0.0 if self._reduce_motion else math.sin(self._phase * math.tau) * 0.03
+            audio = self._amplitude * 0.07 if self._state == AliceState.LISTENING else 0.0
+            for k, span in enumerate((88, 132, 64)):
+                radius = base * (0.78 + k * 0.13 + pulse + audio)
+                arc = QRectF(c.x() - radius, c.y() - radius, radius * 2, radius * 2)
+                ink = QColor(color)
+                ink.setAlphaF(0.72 - k * 0.17)
+                p.setPen(QPen(ink, 2.4 - k * 0.35, Qt.SolidLine, Qt.RoundCap))
+                start = int((self._phase * 360 * (1 if k != 1 else -0.65) + k * 118) * 16)
+                p.drawArc(arc, -start, span * 16)
 
-        glow = QColor(theme.ACCENT)
-        glow.setAlphaF(0.16 if self._active else 0.08)
+        glow = QColor(color)
+        glow.setAlphaF(0.18 if active else 0.08)
         p.setPen(Qt.NoPen)
         p.setBrush(glow)
-        p.drawEllipse(c, base * 0.92, base * 0.92)
+        p.drawEllipse(c, base * 0.88, base * 0.88)
 
         p.setBrush(QColor(theme.SURFACE_2))
-        p.setPen(QPen(QColor(theme.ACCENT if self._active else theme.BORDER), 2))
-        p.drawEllipse(c, base * 0.7, base * 0.7)
-        _draw_mic(p, c, base * 0.44, QColor(theme.ACCENT if self._active else theme.MUTED))
+        outline = QColor(color if self._state != AliceState.IDLE else theme.BORDER)
+        outline.setAlphaF(0.9)
+        p.setPen(QPen(outline, 1.6))
+        p.drawEllipse(c, base * 0.62, base * 0.62)
+        if self._state == AliceState.SUCCESS:
+            _draw_check(p, c, base * 0.33, color)
+        elif self._state == AliceState.ERROR:
+            _draw_cross(p, c, base * 0.29, color)
+        else:
+            _draw_core_mark(p, c, base * 0.24,
+                            color if self._state != AliceState.IDLE else QColor(theme.MUTED))
+
+
+# Compatibility names used by existing pages.
+LevelMeter = VoiceWaveform
+MicOrb = AliceCore
+
+
+class Button(QPushButton):
+    """Consistent button variants: primary, secondary, ghost, danger and icon."""
+
+    NAMES = {
+        "primary": "Primary", "secondary": "Secondary", "ghost": "Ghost",
+        "danger": "Danger", "icon": "IconButton",
+    }
+
+    def __init__(self, text="", *, variant="secondary", parent=None):
+        super().__init__(text, parent)
+        self.setObjectName(self.NAMES.get(variant, "Secondary"))
+        self.setCursor(Qt.PointingHandCursor)
+        self.setProperty("loading", False)
+
+    def set_loading(self, loading: bool, text=None):
+        self.setProperty("loading", bool(loading))
+        self.setEnabled(not loading)
+        if text is not None:
+            self.setText(text)
+
+
+class StatusIndicator(QFrame):
+    def __init__(self, text="", state="info", parent=None):
+        super().__init__(parent)
+        self.setObjectName("Inner")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(10, 6, 10, 6)
+        lay.setSpacing(8)
+        self.dot = QLabel("●")
+        self.text = label(text, name="Muted")
+        lay.addWidget(self.dot)
+        lay.addWidget(self.text)
+        self.set_state(state, text)
+
+    def set_state(self, state, text=None):
+        color = {"success": theme.OK, "warning": theme.WARN,
+                 "danger": theme.FAIL, "accent": theme.ACCENT}.get(state, theme.DIM)
+        self.dot.setStyleSheet(f"color: {color}; font-size: 9px;")
+        if text is not None:
+            self.text.setText(str(text))
+
+
+class AgentActivityItem(QFrame):
+    def __init__(self, activity, parent=None):
+        super().__init__(parent)
+        self.setObjectName("QuietSurface")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(4)
+        row = QHBoxLayout()
+        command = activity.get("command") or "Команда"
+        row.addWidget(label(command, wrap=True))
+        row.addStretch()
+        row.addWidget(label(activity.get("time", ""), name="Dim"))
+        lay.addLayout(row)
+        result = label(activity.get("result") or "Без результата", name="Muted", wrap=True)
+        result.setStyleSheet(
+            f"color: {theme.OK if activity.get('success') else theme.FAIL}; font-size: 12px;")
+        lay.addWidget(result)
+        meta = " · ".join(value for value in (
+            activity.get("action", ""), activity.get("target", "")) if value)
+        if meta:
+            lay.addWidget(label(meta, name="Dim", wrap=True))
+
+
+def _draw_core_mark(p, center, size, color):
+    p.save()
+    p.setPen(QPen(QColor(color), max(1.8, size * 0.16), Qt.SolidLine, Qt.RoundCap))
+    p.setBrush(Qt.NoBrush)
+    p.drawArc(QRectF(center.x() - size, center.y() - size,
+                     size * 2, size * 2), 35 * 16, 110 * 16)
+    p.drawArc(QRectF(center.x() - size * 0.72, center.y() - size * 0.72,
+                     size * 1.44, size * 1.44), 215 * 16, 110 * 16)
+    p.restore()
+
+
+def _draw_check(p, center, size, color):
+    p.save()
+    p.setPen(QPen(QColor(color), max(2.0, size * 0.18), Qt.SolidLine,
+                  Qt.RoundCap, Qt.RoundJoin))
+    p.drawLine(QPointF(center.x() - size, center.y()),
+               QPointF(center.x() - size * 0.24, center.y() + size * 0.72))
+    p.drawLine(QPointF(center.x() - size * 0.24, center.y() + size * 0.72),
+               QPointF(center.x() + size, center.y() - size * 0.72))
+    p.restore()
+
+
+def _draw_cross(p, center, size, color):
+    p.save()
+    p.setPen(QPen(QColor(color), max(2.0, size * 0.18), Qt.SolidLine, Qt.RoundCap))
+    p.drawLine(QPointF(center.x() - size, center.y() - size),
+               QPointF(center.x() + size, center.y() + size))
+    p.drawLine(QPointF(center.x() + size, center.y() - size),
+               QPointF(center.x() - size, center.y() + size))
+    p.restore()
 
 
 def _draw_mic(p: QPainter, center: QPointF, size: float, color: QColor):

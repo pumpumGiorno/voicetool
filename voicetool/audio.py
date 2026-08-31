@@ -99,8 +99,13 @@ class Recorder:
         self.threshold = max(noise * self.cfg.noise_multiplier, self.cfg.min_energy)
         return self.threshold
 
-    def record_utterance(self, silence_seconds):
-        """Блокируется до конца фразы. None — звук кончился (актуально для файла-источника)."""
+    def record_utterance(self, silence_seconds, max_seconds=None):
+        """Блокируется до конца фразы. None — звук кончился (актуально для файла-источника).
+
+        max_seconds ограничивает длину записи: для ожидания слова-триггера нет смысла
+        копить минуту разговора — Whisper потом будет распознавать её целиком впустую.
+        """
+        max_seconds = max_seconds or self.cfg.max_utterance_seconds
         threshold = self.threshold or self.calibrate()
         pre_roll = []
         pre_roll_len = int(PRE_ROLL_SEC / self.frame_sec)
@@ -131,7 +136,7 @@ class Recorder:
                 if silence_sec >= silence_seconds:
                     exhausted = False
                     break
-            if len(collected) * self.frame_sec >= self.cfg.max_utterance_seconds:
+            if len(collected) * self.frame_sec >= max_seconds:
                 exhausted = False
                 break
         if exhausted and not recording:

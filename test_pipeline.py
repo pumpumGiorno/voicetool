@@ -6,7 +6,9 @@
   tools/test_live_pipeline.py — «Алиса» -> распознавание -> счётчик -> вставка
 """
 import json
+import sys
 import tempfile
+import types
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -208,7 +210,14 @@ def test_hotkey_parsing():
     mods, key = hotkey.parse("Ctrl+Alt+A")
     assert mods == hotkey.MOD_CONTROL | hotkey.MOD_ALT and key == ord("A")
     assert hotkey.parse("ctrl+shift+f5")[1] == 0x74
-    assert hotkey.parse("A") is None, "без модификатора нельзя: перехватит ввод во всей системе"
+    assert hotkey.parse("F8") == (0, 0x77), "одиночная клавиша разрешена (бинд на одну кнопку)"
+    assert hotkey.parse("A") == (0, ord("A")), "одиночная буква тоже разрешена"
+    assert hotkey.parse("Escape") == (0, 0x1B)
+    assert hotkey.parse("Tab") == (0, 0x09)
+    assert hotkey.parse("Windows") == (0, hotkey.VK_LWIN), "одиночная клавиша Windows"
+    assert hotkey.parse("Win") == (0, hotkey.VK_LWIN)
+    assert hotkey.parse("Win+F8") == (hotkey.MOD_WIN, 0x77), "Win в сочетании — модификатор"
+    assert hotkey.parse("PrintScreen") == (0, 0x2C)
     assert hotkey.parse("") is None
     assert hotkey.parse("Ctrl+Чепуха") is None
 
@@ -269,7 +278,14 @@ def test_model_prefers_local_cache():
     (local_files_only=True) и только при её отсутствии идёт в сеть. Заодно проверяем,
     что неудачная попытка GPU запоминается и CUDA не пробуется по второму разу.
     """
-    import faster_whisper
+    try:
+        import faster_whisper
+    except ImportError:
+        # This test replaces the model class completely; keep the advertised
+        # dependency-free pipeline suite dependency-free on Linux CI.
+        faster_whisper = types.ModuleType("faster_whisper")
+        faster_whisper.WhisperModel = object
+        sys.modules["faster_whisper"] = faster_whisper
 
     from voicetool import asr as asr_module
     from voicetool import cuda as cuda_module

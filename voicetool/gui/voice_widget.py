@@ -12,22 +12,32 @@
 """
 import math
 
-from PySide6.QtCore import (Property, QEasingCurve, QPoint, QPropertyAnimation, QRectF,
-                            QTimer, Qt)
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtCore import (
+    Property,
+    QEasingCurve,
+    QPoint,
+    QPropertyAnimation,
+    QRectF,
+    Qt,
+    QTimer,
+)
+from PySide6.QtGui import QColor, QCursor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QApplication, QWidget
 
 from . import theme
+from .ui_state import AliceState, normalize_state, presentation
 from .widgets import _draw_mic, plural_words
 
 MARGIN = 24          # отступ от угла экрана
 ORB = 62             # диаметр круга
 CARD_W, CARD_H = 320, 122
 RESULT_MS = 4200     # сколько показывать распознанный текст
+ANIMATED_STATES = {"wake", "recording", "thinking", "understanding", "executing",
+                   "waiting_confirmation"}
 
 
 class FloatingWidget(QWidget):
-    def __init__(self):
+    def __init__(self, reduce_motion=False):
         super().__init__(None)
         self.setWindowFlags(
             Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
@@ -39,6 +49,7 @@ class FloatingWidget(QWidget):
         self.setFixedSize(CARD_W + 24, CARD_H + 24)
 
         self._state = "idle"
+        self._reduce_motion = bool(reduce_motion)
         self._text = ""
         self._words = 0
         self._level = 0.0
@@ -89,7 +100,7 @@ class FloatingWidget(QWidget):
     # --- позиционирование ---------------------------------------------------
 
     def move_to_corner(self):
-        screen = QApplication.primaryScreen()
+        screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
         if not screen:
             return
         geo = screen.availableGeometry()
@@ -99,6 +110,8 @@ class FloatingWidget(QWidget):
 
     def show_idle(self):
         """Спокойная точка: программа слушает, но слова-триггера ещё не было."""
+        if self._state in ("success", "error", "cancelled") and self._hide_timer.isActive():
+            return
         self._set_state("idle", grow=0.0, card=0.0)
         self._fade_in(0.55)
 
@@ -131,9 +144,30 @@ class FloatingWidget(QWidget):
         self._fade_in(1.0)
         self._hide_timer.start(RESULT_MS)
 
+    def show_agent_state(self, state, message=""):
+        """Render factual Stage 1–4 agent progress with the same visual language."""
+        state = normalize_state(state)
+        view = presentation(state, detail=message)
+        self._text = view.detail
+        self._words = 0
+        self._set_state(state.value, grow=1.0, card=1.0)
+        self._fade_in(1.0)
+        if state in {AliceState.SUCCESS, AliceState.ERROR, AliceState.CANCELLED}:
+            self._hide_timer.start(2600 if state == AliceState.SUCCESS else 4200)
+        else:
+            self._hide_timer.stop()
+
     def fade_out(self):
         """Вернуться к минимальному состоянию, если слушаем, иначе исчезнуть совсем."""
         self._hide_timer.stop()
+        self._pulse.stop()
+        if self._reduce_motion:
+            self._card = 0.0
+            self._grow = 0.0
+            self._state = "idle"
+            self.setWindowOpacity(0.55)
+            self.update()
+            return
         self._card_anim.stop()
         self._card_anim.setStartValue(self._card)
         self._card_anim.setEndValue(0.0)
@@ -149,6 +183,10 @@ class FloatingWidget(QWidget):
         """Полностью убрать (микрофон выключен)."""
         self._hide_timer.stop()
         self._pulse.stop()
+        if self._reduce_motion:
+            self._fade.stop()
+            self.hide()
+            return
         self._fade.stop()
         self._fade.setStartValue(self.windowOpacity())
         self._fade.setEndValue(0.0)
@@ -160,18 +198,42 @@ class FloatingWidget(QWidget):
     def push_level(self, level: float):
         self._level = min(1.0, level * 14)
 
+    def set_reduce_motion(self, value):
+        self._reduce_motion = bool(value)
+        if self._reduce_motion:
+            self._pulse.stop()
+            self._fade.stop()
+            self._grow_anim.stop()
+            self._card_anim.stop()
+            self.update()
+
     def _set_state(self, state, grow, card):
         self._state = state
+        if self._reduce_motion:
+            self._pulse.stop()
+            self._grow = grow
+            self._card = card
+            self.update()
+            return
         for anim, target, current in ((self._grow_anim, grow, self._grow),
                                       (self._card_anim, card, self._card)):
             anim.stop()
             anim.setStartValue(current)
             anim.setEndValue(target)
             anim.start()
-        if not self._pulse.isActive():
+        if state in ANIMATED_STATES and not self._pulse.isActive() and not self._reduce_motion:
             self._pulse.start()
+        elif state not in ANIMATED_STATES:
+            self._pulse.stop()
 
     def _fade_in(self, opacity):
+        if self._reduce_motion:
+            self._fade.stop()
+            self.setWindowOpacity(opacity)
+            if not self.isVisible():
+                self.show()
+                self.raise_()
+            return
         if not self.isVisible():
             self.setWindowOpacity(0.0)
             self.show()
@@ -201,7 +263,10 @@ class FloatingWidget(QWidget):
         if self._card > 0.01:
             self._paint_card(p, pad, cx, cy)
 
-        active = self._state in ("recording", "wake", "thinking")
+        active = self._state in (
+            "recording", "wake", "thinking", "listening", "processing",
+            "executing", "waiting_confirmation",
+        )
         if self._state == "recording":
             wave = 1.0 + 0.10 * math.sin(self._phase * 2 * math.pi * 3) + self._level * 0.28
             for k in range(3):
@@ -212,25 +277,25 @@ class FloatingWidget(QWidget):
                 p.setPen(QPen(color, 2))
                 p.drawEllipse(QRectF(cx - r, cy - r, r * 2, r * 2))
             size *= wave
-        elif self._state == "thinking":
+        elif self._state in ("thinking", "processing", "executing", "waiting_confirmation"):
             self._paint_spinner(p, cx, cy, size / 2 + 8)
 
-        halo = QColor(theme.ACCENT)
+        halo = QColor(theme.state_color(self._state))
         halo.setAlphaF(0.20 if active else 0.10)
         p.setPen(Qt.NoPen)
         p.setBrush(halo)
         p.drawEllipse(QRectF(cx - size / 2 - 5, cy - size / 2 - 5, size + 10, size + 10))
 
-        p.setBrush(QColor("#101014"))
-        p.setPen(QPen(QColor(theme.ACCENT if active else "#4A4A56"), 2))
+        p.setBrush(QColor(theme.SURFACE))
+        p.setPen(QPen(QColor(theme.state_color(self._state) if active else theme.BORDER), 2))
         p.drawEllipse(QRectF(cx - size / 2, cy - size / 2, size, size))
         if self._grow > 0.35:
-            color = QColor(theme.ACCENT if active else theme.MUTED)
+            color = QColor(theme.state_color(self._state) if active else theme.MUTED)
             color.setAlphaF(min(1.0, (self._grow - 0.35) / 0.4))
             _draw_mic(p, self.rect().topLeft() + QPoint(int(cx), int(cy)), size * 0.26, color)
 
     def _paint_spinner(self, p, cx, cy, r):
-        color = QColor(theme.ACCENT)
+        color = QColor(theme.state_color(self._state))
         color.setAlphaF(0.85)
         p.setPen(QPen(color, 2.5, Qt.SolidLine, Qt.RoundCap))
         p.setBrush(Qt.NoBrush)
@@ -245,10 +310,10 @@ class FloatingWidget(QWidget):
         path = QPainterPath()
         path.addRoundedRect(rect, 14, 14)
 
-        bg = QColor("#101014")
+        bg = QColor(theme.SURFACE)
         bg.setAlphaF(0.97 * alpha)
         p.fillPath(path, bg)
-        border = QColor(theme.ACCENT)
+        border = QColor(theme.state_color(self._state))
         border.setAlphaF(0.45 * alpha)
         p.setPen(QPen(border, 1.2))
         p.setBrush(Qt.NoBrush)
@@ -263,11 +328,19 @@ class FloatingWidget(QWidget):
         title.setBold(True)
         title.setLetterSpacing(QFont.AbsoluteSpacing, 1.2)
         p.setFont(title)
-        head = QColor(theme.ACCENT if self._words >= 0 else theme.FAIL)
+        head = QColor(theme.state_color(self._state)
+                      if self._state not in ("result",) else
+                      (theme.ACCENT if self._words >= 0 else theme.FAIL))
         head.setAlphaF(alpha)
         p.setPen(head)
+        headers = {
+            "listening": "СЛУШАЮ", "processing": "ОБРАБАТЫВАЮ",
+            "executing": "ВЫПОЛНЯЮ", "waiting_confirmation": "НУЖНО ПОДТВЕРЖДЕНИЕ",
+            "success": "ГОТОВО", "error": "ОШИБКА", "cancelled": "ОТМЕНЕНО",
+        }
         p.drawText(inner, Qt.AlignTop | Qt.AlignLeft,
-                   "РАСПОЗНАНО" if self._words >= 0 else "ОШИБКА")
+                   headers.get(self._state,
+                               "РАСПОЗНАНО" if self._words >= 0 else "ОШИБКА"))
 
         body = QFont(self.font())
         body.setPointSizeF(10.5)
@@ -289,6 +362,10 @@ class FloatingWidget(QWidget):
             p.drawText(inner, Qt.AlignBottom | Qt.AlignLeft,
                        f"+{self._words} {plural_words(self._words)}")
         p.setClipping(False)
+
+    def hideEvent(self, event):
+        self._pulse.stop()
+        super().hideEvent(event)
 
 
 def _elide(text, limit):

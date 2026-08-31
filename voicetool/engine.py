@@ -19,6 +19,8 @@ import threading
 import time
 
 from .audio import Recorder, file_frames, mic_frames
+from .agent import DesktopAgentService
+from .agent.types import AgentResult, AgentStatus
 from .counter import WordCounter, append_log
 from .history import History
 from .text import count_words, find_wake_word
@@ -34,6 +36,12 @@ RECORDING = "recording"
 THINKING = "thinking"  # идёт распознавание
 DONE = "done"
 PAUSED = "paused"
+UNDERSTANDING = "understanding"
+EXECUTING = "executing"
+WAITING_CONFIRMATION = "waiting_confirmation"
+SUCCESS = "success"
+ERROR = "error"
+CANCELLED = "cancelled"
 
 
 class Listener:
@@ -44,7 +52,8 @@ class Listener:
         self.source = source            # путь к файлу вместо микрофона (демо и тесты)
         self.events = events or {}
         self.counter = WordCounter(cfg.data_dir)
-        self.history = History(cfg.data_dir)
+        self.history = History(
+            cfg.data_dir, enabled=bool(cfg.get("log_transcripts", True)))
         self.vocabulary = Vocabulary(cfg.data_dir)
 
         self._thread = None
@@ -53,6 +62,7 @@ class Listener:
         self._force = threading.Event()  # горячая клавиша: слушать команду без слова-триггера
         self._asr = None
         self._wake_asr = None
+        self._agent = None
         self.state = IDLE
 
     # --- управление ---------------------------------------------------------
@@ -73,11 +83,27 @@ class Listener:
         """wait с запасом: поток может доигрывать фразу, а микрофон нужно освободить
         до того, как его откроет новый слушатель."""
         self._stop.set()
+        self.cancel_agent("Прослушивание остановлено")
         thread = self._thread
         if thread and thread.is_alive() and threading.current_thread() is not thread:
             thread.join(timeout=wait)
-        self._thread = None
+        stopped = not thread or not thread.is_alive()
+        if stopped:
+            self._thread = None
+        else:
+            log.warning("Listener не завершился за %.1f с", wait)
         self._emit_state(IDLE)
+        return stopped
+
+    def wait(self, timeout=None) -> bool:
+        """Wait for the listener worker without hiding a still-running thread."""
+        thread = self._thread
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout=timeout)
+        stopped = not thread or not thread.is_alive()
+        if stopped and self._thread is thread:
+            self._thread = None
+        return stopped
 
     def set_paused(self, value: bool):
         self._paused.set() if value else self._paused.clear()
@@ -94,6 +120,29 @@ class Listener:
             return False
         self._force.set()
         return True
+
+    @property
+    def agent_running(self) -> bool:
+        return bool(self._agent and self._agent.running)
+
+    def cancel_agent(self, reason="Остановлено пользователем") -> bool:
+        return bool(self._agent and self._agent.cancel(reason))
+
+    def reset_agent(self):
+        """Reload Local Agent settings without touching the Whisper pipeline."""
+        self.cancel_agent("Настройки Local Agent изменены")
+        self._agent = None
+
+    def execute_agent(self, command):
+        """Public UI hand-off for a typed command.
+
+        It deliberately uses the same service, router, confirmation policy and activity
+        log as voice commands; Stage 5 does not introduce a parallel agent backend.
+        """
+        return self._dispatch_command(str(command or "").strip())
+
+    def resolve_agent_confirmation(self, approved):
+        return bool(self._agent and self._agent.resolve_confirmation(bool(approved)))
 
     # --- события ------------------------------------------------------------
 
@@ -167,7 +216,9 @@ class Listener:
                     self._emit_state(WAITING if not self._paused.is_set() else PAUSED)
                     continue
 
-                audio = rec.record_utterance(self.cfg.wake_silence_seconds)
+                audio = rec.record_utterance(
+                    self.cfg.wake_silence_seconds,
+                    max_seconds=self.cfg.get("wake_max_seconds", 5.0))
                 if audio is None:
                     break                      # источник кадров кончился (файл)
                 if not len(audio) or self._interrupt():
@@ -178,10 +229,16 @@ class Listener:
                 hit, tail = find_wake_word(heard, wake_variants)
                 if not hit:
                     if heard:
-                        log.debug("Мимо: %s", heard)
+                        if self.cfg.get("log_transcripts", True):
+                            log.debug("Мимо: %s", heard)
+                        else:
+                            log.debug("Wake-фраза не совпала (%d символов)", len(heard))
                     continue
 
-                log.info("Слово-триггер: %r", heard)
+                if self.cfg.get("log_transcripts", True):
+                    log.info("Слово-триггер: %r", heard)
+                else:
+                    log.info("Слово-триггер распознан; текст не сохранён")
                 # окно запоминаем СРАЗУ: пока идёт распознавание, пользователь может уйти в другое
                 wake_window = _active_window(self.cfg)
                 self._emit_state(WAKE, heard)
@@ -210,17 +267,58 @@ class Listener:
             self._emit_state(DONE, "")
             return
 
-        log.info("Распознано: %s", command)
+        if self.cfg.get("log_transcripts", True):
+            log.info("Распознано: %s", command)
+        else:
+            log.info("Распознана фраза (%d символов); текст не сохранён", len(command))
         added = self.counter.add(command)
         self.history.add(command, kind="voice", words=added)
         if self.cfg.log_transcripts:
             append_log(self.cfg.data_dir, command)
         self._emit("counter", self.counter.total, added)
         self._emit("recognized", command, added)
+        result = self._dispatch_command(command)
+        if result and result.handled:
+            self.history.add(result.message, kind="agent", source=command)
+            self._emit("agent_result", result)
+            state = SUCCESS if result.success else (
+                CANCELLED if result.status.value == "cancelled" else ERROR)
+            self._emit_state(state, result.message)
+            return
+
         self._emit_state(DONE, command)
 
         if self.cfg.output_mode in ("insert", "insert_show"):
             self._insert(command, wake_window)
+
+    def _dispatch_command(self, command):
+        """The sole hand-off point after STT and before ordinary text insertion."""
+        if not self.cfg.get("agent_enabled", True):
+            return None
+        if self._agent is None:
+            try:
+                self._agent = DesktopAgentService(
+                    self.cfg, events={
+                        "event": self._on_agent_event,
+                        "confirmation": lambda request: self._emit("confirmation", request),
+                    })
+            except (TypeError, ValueError) as exc:
+                message = f"Некорректные настройки Local Agent: {exc}"
+                return AgentResult(True, False, AgentStatus.ERROR, message, command=command)
+        return self._agent.execute(command, source="voice")
+
+    def _on_agent_event(self, event):
+        state = {
+            AgentStatus.UNDERSTANDING: UNDERSTANDING,
+            AgentStatus.EXECUTING: EXECUTING,
+            AgentStatus.WAITING_CONFIRMATION: WAITING_CONFIRMATION,
+            AgentStatus.SUCCESS: SUCCESS,
+            AgentStatus.ERROR: ERROR,
+            AgentStatus.CANCELLED: CANCELLED,
+        }.get(event.status)
+        if state:
+            self._emit_state(state, event.message)
+        self._emit("agent_event", event)
 
     def _hotwords(self):
         """Подсказка модели из пользовательского словаря — или ничего."""

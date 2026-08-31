@@ -13,149 +13,90 @@ import sys
 from pathlib import Path
 
 from voicetool import config, deps, logs, paths
-from voicetool.counter import WordCounter, append_log, save_transcript
-from voicetool.text import find_wake_word
-from voicetool.translate import get_translator, lang_name
+from voicetool.counter import WordCounter
 
 
 def cmd_listen(args, cfg):
     deps.require(["numpy", "faster_whisper"] + ([] if args.source else ["sounddevice"]))
-    import contextlib
+    from voicetool.engine import Listener
 
-    from voicetool.asr import ASR
-    from voicetool.audio import Recorder, file_frames, mic_frames
-    from voicetool.history import History
-
-    wake_variants = [cfg.wake_word] + list(cfg.wake_word_aliases)
-    asr = ASR(cfg, args.model, on_status=lambda m: print(f"[Модель] {m}"))
-    counter = WordCounter(cfg.data_dir)
-    history = History(cfg.data_dir)
-    _ = asr.model  # прогреваем модель заранее, иначе потеряем первую фразу
-
+    runtime = config.Config(cfg)
+    if args.model:
+        runtime["model"] = args.model
+    if args.silence:
+        runtime["silence_seconds"] = args.silence
+    runtime["output_mode"] = "insert" if args.insert else "show"
+    listener = Listener(runtime, source=args.source, events={
+        "status": lambda message: print(f"[Модель] {message}"),
+        "recognized": lambda text, words: print(
+            f"[Распознано]: {text}\n[Счётчик слов]: +{words}"),
+        "agent_result": lambda result: print(f"[Agent]: {result.message}"),
+        "error": lambda message: print(f"[Ошибка]: {message}", file=sys.stderr),
+    })
+    print(f"[Настройки] Пауза до конца команды: {runtime.silence_seconds} с. Ctrl+C — выход.")
     if args.source:
         print(f"[Источник] Файл вместо микрофона: {args.source}")
-        source = contextlib.nullcontext(file_frames(args.source, cfg.sample_rate))
-    else:
-        source = mic_frames(cfg)
-
-    with source as frames:
-        rec = Recorder(frames, cfg)
-        if args.source:
-            rec.threshold = cfg.energy_threshold or cfg.min_energy
-        else:
-            print(f"[Калибровка] Замеряю фоновый шум {cfg.calibration_seconds:.0f} с, помолчите...")
-            print(f"[Калибровка] Порог громкости: {rec.calibrate():.4f}")
-        print(f"[Настройки] Пауза до конца команды: {args.silence or cfg.silence_seconds} с. "
-              f"Ctrl+C — выход.")
-
-        while True:
-            print(f'\n[Ожидание слова "{cfg.wake_word}"...]')
-            audio = rec.record_utterance(cfg.wake_silence_seconds)
-            if audio is None:
-                break
-            if not len(audio):
-                continue
-            heard, _ = asr.transcribe_array(audio, cfg.language_hint)
-            hit, tail = find_wake_word(heard, wake_variants)
-            if not hit:
-                if heard:
-                    print(f"[Мимо]: {heard}")
-                continue
-            print(f"[Триггер]: {heard}")
-
-            command = tail
-            if not command:
-                print("[Слушаю...]")
-                audio = rec.record_utterance(args.silence or cfg.silence_seconds)
-                if audio is None:
-                    break
-                if len(audio):
-                    command, _ = asr.transcribe_array(audio, cfg.language_hint)
-            if not command.strip():
-                print("[Пусто]: после слова-триггера ничего не распознано")
-                continue
-
-            print(f"[Распознано]: {command}")
-            added = counter.add(command)
-            history.add(command, kind="voice", words=added)
-            print(f"[Счётчик слов]: {counter.total} (+{added})")
-            if cfg.log_transcripts:
-                append_log(cfg.data_dir, command)
-            if args.insert:
-                _insert(command, cfg)
-    return 0
-
-
-def _insert(text, cfg):
-    from voicetool import inject
-
+    listener.start()
     try:
-        inject.type_text(text, press_enter=bool(cfg.press_enter),
-                         pause=max(0, int(cfg.get("type_delay_ms", 10))) / 1000)
-        print("[Набрано] в активное окно (буфер обмена не задействован)")
-    except Exception as e:
-        print(f"[Ввод не удался]: {e}", file=sys.stderr)
+        listener.wait()
+    finally:
+        listener.stop()
+    return 0
 
 
 def cmd_file(args, cfg):
     deps.require(["numpy", "faster_whisper"])
-    from voicetool.asr import ASR
-    from voicetool.history import History
-    from voicetool.subtitles import to_srt, to_vtt
+    from voicetool.processor import DONE, BatchProcessor
+    from voicetool.translate import lang_name
 
-    asr = ASR(cfg, args.model, on_status=lambda m: print(f"[Модель] {m}"))
+    runtime = config.Config(cfg)
+    if args.model:
+        runtime["model"] = args.model
+    if args.no_translate:
+        runtime["translator"] = "none"
     tty = bool(getattr(sys.stderr, "isatty", lambda: False)())
 
-    def progress(done, total):
-        if tty and total:
-            print(f"\r[Распознавание] {min(100, int(done / total * 100)):3d}%  "
-                  f"{_hms(done)} / {_hms(total)}", end="", file=sys.stderr, flush=True)
+    def progress(current):
+        if tty and current.duration:
+            print(f"\r[Распознавание] {min(100, int(current.progress * 100)):3d}%  "
+                  f"{_hms(current.position)} / {_hms(current.duration)}",
+                  end="", file=sys.stderr, flush=True)
 
+    processor = BatchProcessor(runtime, events={
+        "status": lambda message: print(f"[Модель] {message}"),
+        "progress": progress,
+    })
+    job = processor.add([args.path], language_hint=args.lang)[0]
+    if job.error:
+        print(f"[Ошибка]: {job.error}", file=sys.stderr)
+        return 2
+    processor.start()
     try:
-        result = asr.transcribe_file(args.path, language=args.lang, on_progress=progress)
-    except (FileNotFoundError, RuntimeError) as e:
-        print(f"\n[Ошибка]: {e}", file=sys.stderr)
+        processor.wait()
+    finally:
+        processor.cancel()
+    if job.status != DONE:
+        print(f"[Ошибка]: {job.error or job.status}", file=sys.stderr)
         return 2
     if tty:
         print("\r" + " " * 60 + "\r", end="", file=sys.stderr)
-
-    lang, text = result["language"], result["text"]
-    print(f"[Определён язык]: {lang_name(lang)} "
-          f"({lang}, уверенность {result['language_probability']:.0%}, "
-          f"длительность {int(result['duration'] // 60)} мин {int(result['duration'] % 60)} с)")
-    if not text:
-        print("[Текст]: речь не распознана")
-        return 0
-
-    body = [f"Файл: {args.path}", f"Язык: {lang_name(lang)} ({lang})", "", text]
-    if lang == cfg.translate_to:
-        print(f"[Текст]: {text}")
-    else:
-        print(f"[Оригинал]: {text}")
-        translator = get_translator(cfg, enabled=not args.no_translate)
-        if translator is None:
-            print("[Перевод]: отключён")
-        else:
-            try:
-                translated = translator.translate(text, lang)
-                print(f"[Перевод на {lang_name(cfg.translate_to)}]: {translated}")
-                body += ["", f"Перевод ({lang_name(cfg.translate_to)}):", translated]
-            except RuntimeError as e:
-                print(f"[Перевод не выполнен]: {e}", file=sys.stderr)
-
-    if cfg.log_transcripts:
-        saved = save_transcript(cfg.data_dir, args.path, "\n".join(body))
-        print(f"[Сохранено]: {saved}")
-    # текст из файла в счётчик слов не попадает — это только живой режим
-    History(cfg.data_dir).add(text[:400], kind="file", words=0,
-                              source=Path(args.path).name, language=lang)
-
-    for fmt, render in (("srt", to_srt), ("vtt", to_vtt)):
+    print(f"[Определён язык]: {lang_name(job.language)} "
+          f"({job.language}, уверенность {job.language_probability:.0%}, "
+          f"длительность {int(job.duration // 60)} мин {int(job.duration % 60)} с)")
+    print(job.report())
+    if job.saved_to:
+        print(f"[Сохранено]: {job.saved_to}")
+    for fmt in ("srt", "vtt"):
         if getattr(args, fmt):
             out = Path(getattr(args, fmt))
-            out.write_text(render(result["segments"]), encoding="utf-8")
+            out.write_text(getattr(job, fmt)(), encoding="utf-8")
             print(f"[Субтитры {fmt.upper()}]: {out}")
     return 0
+
+
+def _hms(seconds):
+    seconds = int(seconds)
+    return f"{seconds // 3600:02d}:{seconds // 60 % 60:02d}:{seconds % 60:02d}"
 
 
 def cmd_count(args, cfg):
@@ -238,11 +179,6 @@ def build_parser():
     sub.add_parser("check", help="проверить зависимости, микрофон и настройки").set_defaults(func=cmd_check)
     sub.add_parser("gui", help="открыть графический интерфейс").set_defaults(func=cmd_gui)
     return p
-
-
-def _hms(seconds):
-    seconds = int(seconds)
-    return f"{seconds // 3600:02d}:{seconds // 60 % 60:02d}:{seconds % 60:02d}"
 
 
 def main(argv=None):

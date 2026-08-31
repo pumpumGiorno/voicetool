@@ -16,9 +16,11 @@ DEFAULTS = {
     # --- живой режим ---
     "wake_word": "алиса",
     # варианты, как Whisper может расслышать слово-триггер (сравнение нечёткое)
-    "wake_word_aliases": ["алиса", "алис", "alisa", "alice"],
+    "wake_word_aliases": ["алиса", "алис", "алисо", "ализа", "лиса", "алеся",
+                          "alisa", "alice", "aliza", "elisa"],
     "silence_seconds": 2.5,        # пауза, после которой команда считается законченной
     "wake_silence_seconds": 0.7,   # пауза для короткой фразы со словом-триггером
+    "wake_max_seconds": 5.0,       # wake-фраза длиннее не бывает; ограничение экономит CPU
     "max_utterance_seconds": 60,
     "min_speech_seconds": 0.3,     # короче — считаем шумом, не распознаём
 
@@ -26,8 +28,8 @@ DEFAULTS = {
     "sample_rate": 16000,
     "input_device": None,          # None = устройство по умолчанию, иначе номер из `check`
     "energy_threshold": 0,         # 0 = замерить фоновый шум при старте
-    "noise_multiplier": 4.0,       # во сколько раз речь громче фона (крутилка чувствительности)
-    "min_energy": 0.006,           # нижняя граница порога, чтобы не ловить тишину
+    "noise_multiplier": 3.0,       # во сколько раз речь громче фона (крутилка чувствительности)
+    "min_energy": 0.005,           # нижняя граница порога, чтобы не ловить тишину
     "calibration_seconds": 1.0,
 
     # --- распознавание ---
@@ -41,7 +43,8 @@ DEFAULTS = {
     # На фрагменте в секунду автоопределение языка часто врёт, поэтому язык живого
     # режима задаётся здесь. null — определять автоматически.
     "language_hint": "ru",
-    "beam_size": 5,
+    "beam_size": 2,                # 2 почти не уступает 5 по точности, но заметно быстрее на CPU
+    "cpu_threads": 0,              # 0 = все ядра процессора; >0 — ровно столько потоков
     "chunk_seconds": 300,          # длина куска при разборе файла (память не растёт с длиной)
     "whisper_models_dir": "",      # "" = кэш HuggingFace в профиле пользователя
 
@@ -61,10 +64,34 @@ DEFAULTS = {
     # (Блокнот Windows 11). Меньше — быстрее, но часть приложений начнёт терять символы.
     "type_delay_ms": 15,
 
+    # --- локальный desktop agent (Stage 1) ---
+    # smart: точные desktop-команды идут через deterministic fast path, обычный
+    # текст остаётся диктовкой, неоднозначные action-like фразы проверяет Ollama.
+    "agent_enabled": True,
+    "voice_mode": "smart",       # smart | dictation | agent
+    "ollama_url": "http://127.0.0.1:11434",
+    "ollama_model": "qwen3.5:9b",
+    "ollama_context": 8192,
+    "ollama_temperature": 0.1,
+    "ollama_timeout_seconds": 90,
+    "ollama_keep_alive": "10m",
+    "max_agent_steps": 8,
+    "strict_local_ai": True,
+    "vision_enabled": True,
+    "max_vision_steps": 3,
+    "visual_settle_seconds": 0.35,
+    "app_launch_timeout_seconds": 5.0,
+    "steam_launch_timeout_seconds": 20.0,
+    "app_resolver_cache_seconds": 180,
+    "allowed_url_schemes": [],   # custom schemes; http/https are always allowed
+    "confirmation_timeout_seconds": 120.0,
+    "shutdown_timeout_seconds": 6.0,
+
     # --- интерфейс ---
     "show_floating_widget": True,
     "minimize_to_tray": True,
     "show_notifications": True,
+    "reduce_animations": False,
     "start_with_windows": False,   # намеренно выключено: автозапуск включает пользователь
     "start_listening_on_launch": False,
     "hotkey": "Ctrl+Alt+A",
@@ -79,6 +106,7 @@ DEFAULTS = {
 # restore_clipboard — со времён, когда текст вставлялся через буфер обмена; теперь символы
 # набираются напрямую и буфер не используется вообще.
 OBSOLETE = {"restore_clipboard"}
+LEGACY_ALIASES = {"reduce_motion": "reduce_animations"}
 
 # Ключи, у которых сменилось значение по умолчанию. Если в файле лежит ровно старое
 # умолчание, пользователь его не выбирал — он просто получил его когда-то при создании
@@ -86,6 +114,11 @@ OBSOLETE = {"restore_clipboard"}
 MIGRATED_DEFAULTS = {
     "wake_model": ("", "tiny"),        # лёгкая модель на слово-триггер — главный выигрыш в задержке
     "compute_type": ("int8", "auto"),  # auto = float16 на видеокарте, int8 на процессоре
+    "beam_size": (5, 2),               # beam=2 почти так же точен, но заметно быстрее на CPU
+    "noise_multiplier": (4.0, 3.0),    # порог 4× пропускал негромкую речь мимо детектора
+    "min_energy": (0.006, 0.005),
+    "wake_word_aliases": (["алиса", "алис", "alisa", "alice"],
+                          DEFAULTS["wake_word_aliases"]),  # больше вариантов ослышек Whisper
 }
 
 
@@ -131,7 +164,12 @@ def load(path: Path = None) -> Config:
             user = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as e:
             raise SystemExit(f"Ошибка в {path}: {e}\nПочините файл или удалите его — он создастся заново.")
-        unknown = set(user) - set(DEFAULTS) - OBSOLETE
+        if not isinstance(user, dict):
+            raise SystemExit(f"Ошибка в {path}: корень config.json должен быть объектом.")
+        for old, new in LEGACY_ALIASES.items():
+            if old in user and new not in user:
+                user[new] = user[old]
+        unknown = set(user) - set(DEFAULTS) - OBSOLETE - set(LEGACY_ALIASES)
         if unknown:
             log.warning("Неизвестные ключи в %s игнорируются: %s", path, ", ".join(sorted(unknown)))
         cfg.update({k: v for k, v in user.items() if k in DEFAULTS})
