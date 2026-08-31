@@ -26,10 +26,23 @@ log = logging.getLogger(__name__)
 IS_WINDOWS = hasattr(ctypes, "windll")
 
 VK_CONTROL, VK_MENU, VK_SHIFT, VK_RETURN = 0x11, 0x12, 0x10, 0x0D
+VK_LWIN = 0x5B
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
 INPUT_KEYBOARD = 1
 ERROR_ACCESS_DENIED = 5
+
+KEY_NAMES = {
+    "ctrl": VK_CONTROL, "control": VK_CONTROL, "alt": VK_MENU, "shift": VK_SHIFT,
+    "win": VK_LWIN, "windows": VK_LWIN, "enter": VK_RETURN, "return": VK_RETURN,
+    "tab": 0x09, "escape": 0x1B, "esc": 0x1B, "space": 0x20,
+    "backspace": 0x08, "delete": 0x2E, "home": 0x24, "end": 0x23,
+    "pageup": 0x21, "pagedown": 0x22, "up": 0x26, "down": 0x28,
+    "left": 0x25, "right": 0x27,
+    **{f"f{i}": 0x6F + i for i in range(1, 25)},
+    **{str(i): 0x30 + i for i in range(10)},
+    **{chr(code).lower(): code for code in range(ord("A"), ord("Z") + 1)},
+}
 
 # Темп набора. Символы уходят по одному, с интервалом: приложение должно успеть
 # принять и нажатие, и отпускание. Если гнать быстрее, Windows считает клавишу
@@ -181,6 +194,19 @@ def send_shift_enter():
 
 def send_enter():
     _send([_vk_event(VK_RETURN), _vk_event(VK_RETURN, up=True)])
+
+
+def press_keys(keys) -> bool:
+    """Press a validated key/chord without interpreting text as a command."""
+    if not IS_WINDOWS:
+        raise InjectionError("Нажатия клавиш поддерживаются только на Windows")
+    names = [str(key).strip().lower() for key in keys]
+    virtual = [KEY_NAMES.get(name) for name in names]
+    if not names or len(names) > 5 or any(vk is None for vk in virtual):
+        raise InjectionError("Неподдерживаемая клавиша или сочетание")
+    _send([_vk_event(vk) for vk in virtual]
+          + [_vk_event(vk, up=True) for vk in reversed(virtual)])
+    return True
 
 
 def _code_units(ch: str):

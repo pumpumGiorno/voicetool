@@ -86,6 +86,7 @@ def build(onefile=False):
             args += ["--collect-data", package]
         for package in ("pycaw", "comtypes"):
             args += ["--collect-submodules", package]
+        args += ["--hidden-import", "psutil"]
         for package in ("ctranslate2", "av", "onnxruntime", "sounddevice", "sentencepiece"):
             args += ["--collect-binaries", package]
         for module in ("tkinter", "matplotlib", "scipy", "pandas",

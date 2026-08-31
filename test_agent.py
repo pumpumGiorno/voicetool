@@ -14,7 +14,7 @@ from voicetool.agent.router import RouteKind, VoiceCommandRouter
 from voicetool.agent.service import DesktopAgentService
 from voicetool.agent.session import AgentSession
 from voicetool.agent.tools import ToolRegistry
-from voicetool.agent.types import AgentResult, AgentStatus, ToolCall, ToolResult
+from voicetool.agent.types import AgentResult, AgentStatus, ErrorCode, ToolCall, ToolResult
 from voicetool.engine import Listener
 
 
@@ -24,6 +24,7 @@ class FakeAutomation:
 
     def __getattr__(self, name):
         def handler(**arguments):
+            arguments.pop("token", None)
             self.calls.append((name, arguments))
             data = dict(arguments)
             if "app_name" in arguments:
@@ -80,8 +81,9 @@ class RouterTests(unittest.TestCase):
                          RouteKind.DICTATION)
         self.assertEqual(self.router.route("Организуй работу с окнами приложения").kind,
                          RouteKind.AGENT)
-        self.assertEqual(self.router.route("Открой Telegram и напиши сообщение").kind,
-                         RouteKind.AGENT)
+        chained = self.router.route("Открой Telegram и напиши сообщение")
+        self.assertEqual(chained.kind, RouteKind.FAST_PATH)
+        self.assertEqual([call.name for call in chained.calls], ["launch_app", "type_text"])
 
     def test_required_fast_path_grammar(self):
         self.assert_fast("Открой Telegram", "launch_app", {"app_name": "telegram"})
@@ -129,8 +131,8 @@ class RegistryTests(unittest.TestCase):
         missing = self.registry.execute(ToolCall("does_not_exist", {}), self.token)
         invalid = self.registry.execute(
             ToolCall("set_volume", {"percent": 30, "command": "whoami"}), self.token)
-        self.assertEqual(missing.code, "tool_not_found")
-        self.assertEqual(invalid.code, "invalid_arguments")
+        self.assertEqual(missing.code, ErrorCode.UNSUPPORTED_ACTION)
+        self.assertEqual(invalid.code, ErrorCode.INVALID_ARGUMENT)
         self.assertEqual(self.automation.calls, [])
 
     def test_shell_execution_is_unavailable(self):
@@ -139,9 +141,11 @@ class RegistryTests(unittest.TestCase):
         schemas = str(self.registry.schemas()).lower()
         self.assertNotIn("powershell", schemas)
         self.assertNotIn("run_command", schemas)
-        self.assertIsNone(AppResolver().resolve("powershell"))
-        self.assertIsNone(AppResolver().resolve("cmd"))
-        self.assertIsNone(AppResolver().resolve("powershell -c whoami"))
+        with tempfile.TemporaryDirectory() as tmp:
+            resolver = AppResolver(tmp)
+            self.assertIsNone(resolver.resolve("powershell"))
+            self.assertIsNone(resolver.resolve("cmd"))
+            self.assertIsNone(resolver.resolve("powershell -c whoami"))
 
 
 class ServiceTests(unittest.TestCase):
@@ -213,7 +217,7 @@ class ServiceTests(unittest.TestCase):
                 provider=FakeProvider(responses=[invalid, finish]))
             result = service.execute("Выполни команду оболочки")
             self.assertFalse(result.success)
-            self.assertEqual(result.steps[0].code, "tool_not_found")
+            self.assertEqual(result.steps[0].code, ErrorCode.UNSUPPORTED_ACTION)
 
     def test_context_pronoun_resolution(self):
         with tempfile.TemporaryDirectory() as tmp:

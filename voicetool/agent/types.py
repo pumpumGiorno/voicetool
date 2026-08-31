@@ -7,6 +7,18 @@ from enum import Enum
 from typing import Any
 
 
+class ErrorCode:
+    """Stable machine-readable errors returned by native Stage 2 tools."""
+
+    APP_NOT_FOUND = "APP_NOT_FOUND"
+    WINDOW_NOT_FOUND = "WINDOW_NOT_FOUND"
+    FILE_NOT_FOUND = "FILE_NOT_FOUND"
+    ACCESS_DENIED = "ACCESS_DENIED"
+    INVALID_ARGUMENT = "INVALID_ARGUMENT"
+    ACTION_TIMEOUT = "ACTION_TIMEOUT"
+    UNSUPPORTED_ACTION = "UNSUPPORTED_ACTION"
+
+
 class AgentStatus(str, Enum):
     DICTATION = "dictation"
     UNDERSTANDING = "understanding"

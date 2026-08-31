@@ -77,6 +77,9 @@ DEFAULTS = {
     "ollama_keep_alive": "10m",
     "max_agent_steps": 8,
     "strict_local_ai": True,
+    "app_launch_timeout_seconds": 5.0,
+    "app_resolver_cache_seconds": 180,
+    "allowed_url_schemes": [],   # custom schemes; http/https are always allowed
 
     # --- интерфейс ---
     "show_floating_widget": True,

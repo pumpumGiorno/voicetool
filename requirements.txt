@@ -14,9 +14,10 @@ sentencepiece>=0.2
 # не нужны, а весят они больше, чем всё остальное вместе взятое.
 PySide6-Essentials>=6.7
 
-# Windows master-volume backend used by the local Stage 1 desktop agent.
+# Windows native backends used by the local Stage 2 desktop agent.
 pycaw>=20230407
 comtypes>=1.2
+psutil>=5.9
 
 # Сборка VoiceTool.exe. Для работы программы не требуется — только для build_exe.py.
 pyinstaller>=6.0
