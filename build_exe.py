@@ -84,9 +84,9 @@ def build(onefile=False):
         for package in ("faster_whisper", "sounddevice", "sentencepiece", "tokenizers",
                         "onnxruntime"):
             args += ["--collect-data", package]
-        for package in ("pycaw", "comtypes"):
+        for package in ("pycaw", "comtypes", "pywinauto"):
             args += ["--collect-submodules", package]
-        args += ["--hidden-import", "psutil"]
+        args += ["--hidden-import", "psutil", "--hidden-import", "PIL.ImageGrab"]
         for package in ("ctranslate2", "av", "onnxruntime", "sounddevice", "sentencepiece"):
             args += ["--collect-binaries", package]
         for module in ("tkinter", "matplotlib", "scipy", "pandas",

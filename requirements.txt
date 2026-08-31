@@ -19,6 +19,10 @@ pycaw>=20230407
 comtypes>=1.2
 psutil>=5.9
 
+# Stage 4 backends are imported lazily; native commands still run if they are unavailable.
+Pillow>=10.0
+pywinauto>=0.6.8
+
 # Сборка VoiceTool.exe. Для работы программы не требуется — только для build_exe.py.
 pyinstaller>=6.0
 

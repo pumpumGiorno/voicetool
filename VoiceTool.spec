@@ -26,7 +26,8 @@ hiddenimports += collect_submodules("av")
 hiddenimports += ["ctranslate2", "sentencepiece", "onnxruntime", "sounddevice"]
 hiddenimports += collect_submodules("pycaw")
 hiddenimports += collect_submodules("comtypes")
-hiddenimports += ["psutil"]
+hiddenimports += collect_submodules("pywinauto")
+hiddenimports += ["psutil", "PIL.ImageGrab"]
 
 # лишнее в сборке: тянет сотни мегабайт и не используется
 excludes = [

@@ -278,7 +278,7 @@ class NativeToolTests(unittest.TestCase):
 
 
 class RegistryStage2Tests(unittest.TestCase):
-    def test_registry_contains_native_tools_only(self):
+    def test_registry_preserves_native_tools_and_isolates_coordinates(self):
         registry = ToolRegistry(type("Controller", (), {name: (lambda self, **kwargs: None)
             for name in (
                 "resolve_app", "list_installed_apps", "launch_app", "focus_app", "close_app",
@@ -298,8 +298,10 @@ class RegistryStage2Tests(unittest.TestCase):
         }
         stage3 = {"get_installed_steam_games", "resolve_steam_game",
                   "launch_steam_game", "wait"}
-        self.assertEqual(set(registry.names), required | stage3)
-        forbidden = {"mouse_click", "take_screenshot", "invoke_ui_element",
+        stage4 = {"get_ui_elements", "find_ui_element", "invoke_ui_element",
+                  "set_ui_value", "get_screen_size", "visual_interact"}
+        self.assertEqual(set(registry.names), required | stage3 | stage4)
+        forbidden = {"mouse_click", "mouse_drag", "take_screenshot",
                      "shell", "powershell", "run_command"}
         self.assertFalse(set(registry.names) & forbidden)
 

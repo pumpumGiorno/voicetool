@@ -20,7 +20,8 @@ class ConfirmationPolicy:
         "open_url", "open_file", "open_folder", "find_file", "show_in_folder",
         "type_text", "get_volume", "set_volume", "change_volume", "mute_volume",
         "unmute_volume", "get_installed_steam_games", "resolve_steam_game",
-        "launch_steam_game", "wait",
+        "launch_steam_game", "wait", "get_ui_elements", "find_ui_element",
+        "invoke_ui_element", "set_ui_value", "get_screen_size", "visual_interact",
     }
     HIGH_IMPACT = {
         "delete_file", "permanent_delete", "empty_recycle_bin", "send_message",
@@ -38,6 +39,13 @@ class ConfirmationPolicy:
                 else arguments.get("keys", []) if name == "press_keys" else [])
         if any(str(key).casefold() in {"enter", "return"} for key in keys):
             return Risk.HIGH, "Клавиша может отправить или подтвердить внешнее действие."
+        if name in {"invoke_ui_element", "visual_interact"} and re.search(
+            r"send|submit|publish|purchase|buy|delete|install|отправ|опубликов|"
+            r"купить|удалить|установить|подтверд",
+            " ".join(str(arguments.get(key, ""))
+                     for key in ("name", "target", "expected_result")), re.I,
+        ):
+            return Risk.HIGH, "UI action может выполнить внешнее или необратимое действие."
         return Risk.LOW, ""
 
     def needs_confirmation(self, tool: str, arguments: dict | None = None) -> tuple[bool, str]:
@@ -65,7 +73,7 @@ def safe_arguments(arguments: dict | None) -> dict:
     def clean(key, value, depth=0):
         if _SECRET_KEY.search(str(key)) or str(key).startswith("_"):
             return "[redacted]"
-        if key == "text":
+        if key in {"text", "value"}:
             return {"redacted": True, "characters": len(str(value or ""))}
         if depth >= 3:
             return "[truncated]"

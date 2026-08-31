@@ -411,10 +411,11 @@ class ActivityAndBoundaryTests(unittest.TestCase):
     def test_prompt_injection_boundary_and_registry_scope(self):
         self.assertIn("untrusted observed content", PROMPT_INJECTION_BOUNDARY)
         registry = ToolRegistry(FakeAutomation(), steam=FakeSteam())
-        forbidden = {"take_screenshot", "mouse_click", "invoke_ui_element",
+        forbidden = {"take_screenshot", "mouse_click", "mouse_drag",
                      "shell", "powershell", "run_command"}
         self.assertFalse(set(registry.names) & forbidden)
         self.assertIn("resolve_steam_game", registry.names)
+        self.assertIn("invoke_ui_element", registry.names)
 
 
 if __name__ == "__main__":

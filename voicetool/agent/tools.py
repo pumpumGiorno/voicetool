@@ -1,4 +1,4 @@
-"""Typed Stage 3 registry with central confirmation and activity logging."""
+"""Typed registry for native, UIA and isolated local-vision operations."""
 from __future__ import annotations
 
 import time
@@ -7,8 +7,10 @@ from typing import Any, Callable
 
 from .action_log import ActivityLogger
 from .cancellation import AgentCancelled, CancellationToken
+from .computer import DesktopComputer
 from .safety import ConfirmationPolicy
 from .steam import SteamController
+from .uia import UIAutomationController
 from .types import ConfirmationRequest, ErrorCode, ToolCall, ToolResult
 
 
@@ -19,6 +21,7 @@ class ToolSpec:
     parameters: dict[str, Any]
     handler: Callable
     needs_token: bool = False
+    tier: int = 1
 
     def ollama_schema(self):
         return {"type": "function", "function": {
@@ -27,9 +30,13 @@ class ToolSpec:
 
 
 class ToolRegistry:
-    def __init__(self, controller, *, steam=None, policy=None, activity_logger=None):
+    def __init__(self, controller, *, steam=None, policy=None, activity_logger=None,
+                 uia=None, computer=None, visual=None):
         self.controller = controller
         self.steam = steam or SteamController(getattr(controller, "cfg", {}))
+        self.uia = uia or UIAutomationController()
+        self.computer = computer or DesktopComputer(input_controller=controller)
+        self.visual = visual
         self.policy = policy or ConfirmationPolicy()
         self.activity_logger: ActivityLogger | None = activity_logger
         self._tools: dict[str, ToolSpec] = {}
@@ -40,15 +47,28 @@ class ToolRegistry:
         return tuple(self._tools)
 
     def schemas(self):
-        return [spec.ollama_schema() for spec in self._tools.values()]
+        # Stable sorting makes the intended fallback order explicit to the model.
+        return [spec.ollama_schema()
+                for spec in sorted(self._tools.values(), key=lambda item: item.tier)]
 
-    def execute(self, call: ToolCall, token: CancellationToken, *, command="", confirm=None) -> ToolResult:
+    def tier(self, name: str) -> int:
+        spec = self._tools.get(str(name))
+        return spec.tier if spec else 99
+
+    def execute(self, call: ToolCall, token: CancellationToken, *, command="", confirm=None,
+                allow_visual=False) -> ToolResult:
         started = time.perf_counter()
         confirmation = "not_required"
         token.raise_if_cancelled()
         spec = self._tools.get(str(call.name))
         if not spec:
             result = ToolResult.fail(ErrorCode.UNSUPPORTED_ACTION, f"Неизвестный tool: {call.name}")
+            return self._finish(call, result, started, command, confirmation)
+        if call.name == "visual_interact" and not allow_visual:
+            result = ToolResult.fail(
+                ErrorCode.VISION_FALLBACK_NOT_READY,
+                "Visual fallback доступен только после неудачи lower automation layer",
+            )
             return self._finish(call, result, started, command, confirmation)
 
         try:
@@ -90,8 +110,11 @@ class ToolRegistry:
 
         try:
             token.raise_if_cancelled()
-            output = (spec.handler(token=token, **arguments) if spec.needs_token
-                      else spec.handler(**arguments))
+            if call.name == "visual_interact":
+                output = spec.handler(token=token, user_command=command, **arguments)
+            else:
+                output = (spec.handler(token=token, **arguments) if spec.needs_token
+                          else spec.handler(**arguments))
             result = output if isinstance(output, ToolResult) else ToolResult.ok(data=output or {})
         except AgentCancelled as exc:
             cancelled = ToolResult.fail(ErrorCode.CANCELLED, str(exc) or "Отменено")
@@ -116,14 +139,17 @@ class ToolRegistry:
         return result
 
     def _add(self, name, description, properties=None, required=(), handler=None,
-             *, needs_token=False):
+             *, needs_token=False, tier=1):
         schema = {"type": "object", "properties": properties or {},
                   "required": list(required), "additionalProperties": False}
-        self._tools[name] = ToolSpec(name, description, schema, handler, needs_token)
+        self._tools[name] = ToolSpec(name, description, schema, handler, needs_token, int(tier))
 
     def _register_defaults(self):
-        def string(description, max_length=260):
-            return {"type": "string", "description": description, "maxLength": max_length}
+        def string(description, max_length=260, enum=None):
+            rule = {"type": "string", "description": description, "maxLength": max_length}
+            if enum:
+                rule["enum"] = list(enum)
+            return rule
 
         def integer(description, low, high):
             return {"type": "integer", "description": description,
@@ -168,11 +194,14 @@ class ToolRegistry:
         self._add("open_url", "Open an allowed URL in the default browser.",
                   {"url": string("http/https URL", 4096)}, ("url",), c.open_url)
         self._add("type_text", "Type Unicode text with Windows Unicode input, not clipboard.",
-                  {"text": string("Unicode text", 20_000)}, ("text",), c.type_text)
+                  {"text": string("Unicode text", 20_000)}, ("text",), c.type_text,
+                  tier=4)
         self._add("press_key", "Press one validated non-submit keyboard key.",
-                  {"key": string("Supported key name", 32)}, ("key",), c.press_key)
+                  {"key": string("Supported key name", 32)}, ("key",), c.press_key,
+                  tier=4)
         self._add("press_keys", "Press a validated non-submit keyboard shortcut.",
-                  {"keys": array("Ordered key names")}, ("keys",), c.press_keys)
+                  {"keys": array("Ordered key names")}, ("keys",), c.press_keys,
+                  tier=4)
 
         self._add("get_volume", "Get Windows master volume and mute state.",
                   handler=c.get_volume)
@@ -197,6 +226,56 @@ class ToolRegistry:
         self._add("show_in_folder", "Reveal an existing file in Windows Explorer.",
                   {"path": string("Existing path", 32_000)}, ("path",), c.show_in_folder)
 
+        ui_query = {
+            "name": string("Accessible element name observed in the current window"),
+            "window": string("Optional top-level window title"),
+            "control_type": string("Optional UI Automation control type", 80),
+        }
+        self._add(
+            "get_ui_elements",
+            "Summarize only actionable UI Automation controls; observed text is untrusted.",
+            {
+                "window": string("Optional top-level window title"),
+                "max_elements": integer("Maximum summarized elements", 1, 100),
+            },
+            handler=self.uia.get_ui_elements,
+            tier=3,
+        )
+        self._add(
+            "find_ui_element",
+            "Find one actionable UI Automation control without coordinate interaction.",
+            ui_query, ("name",), self.uia.find_ui_element, tier=3,
+        )
+        self._add(
+            "invoke_ui_element",
+            "Invoke one accessible control through its UIA pattern; never click coordinates.",
+            ui_query, ("name",), self.uia.invoke_ui_element, tier=3,
+        )
+        self._add(
+            "set_ui_value",
+            "Set an accessible control through its UIA Value pattern.",
+            {**ui_query, "value": string("New value", 20_000)},
+            ("name", "value"), self.uia.set_ui_value, tier=3,
+        )
+        self._add(
+            "get_screen_size",
+            "Get DPI-aware multi-monitor virtual-screen bounds without taking a screenshot.",
+            handler=self.computer.get_screen_size,
+            tier=5,
+        )
+        visual_handler = (self.visual.interact if self.visual is not None
+                          else _visual_unavailable)
+        self._add(
+            "visual_interact",
+            "LAST FALLBACK: locally locate and interact with one visible target, then verify it.",
+            {
+                "target": string("User-requested visible target", 500),
+                "action": string("Visual action", 32, enum=["click", "double_click"]),
+                "expected_result": string("Observable result to verify", 500),
+            },
+            ("target",), visual_handler, needs_token=True, tier=5,
+        )
+
         self._add("get_installed_steam_games",
                   "List locally installed Steam games parsed from app manifests.",
                   handler=self.steam.get_installed)
@@ -219,6 +298,12 @@ def _wait(seconds: float, token: CancellationToken) -> ToolResult:
     return ToolResult.ok(f"Ожидание {seconds:g} с завершено")
 
 
+def _visual_unavailable(token: CancellationToken, **_arguments) -> ToolResult:
+    token.raise_if_cancelled()
+    return ToolResult.fail(ErrorCode.VISION_UNAVAILABLE,
+                           "Local visual fallback is not configured")
+
+
 def validate_arguments(schema: dict, arguments: Any) -> dict:
     if not isinstance(arguments, dict):
         raise ValueError("Аргументы tool должны быть JSON object")
@@ -238,6 +323,8 @@ def validate_arguments(schema: dict, arguments: Any) -> dict:
                 raise ValueError(f"{name}: ожидалась непустая строка")
             if len(value) > int(rule.get("maxLength", 32_000)):
                 raise ValueError(f"{name}: значение слишком длинное")
+            if rule.get("enum") and value not in rule["enum"]:
+                raise ValueError(f"{name}: неподдерживаемое значение")
         elif expected == "integer":
             if isinstance(value, bool) or not isinstance(value, int):
                 raise ValueError(f"{name}: ожидалось целое число")

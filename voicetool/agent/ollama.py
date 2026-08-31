@@ -1,6 +1,7 @@
 """Ollama provider using only the local native HTTP API."""
 from __future__ import annotations
 
+import base64
 import ipaddress
 import json
 import socket
@@ -87,6 +88,66 @@ class OllamaProvider:
         }
         return self._stream_chat(payload, token)
 
+    def vision_status(self) -> tuple[bool, str]:
+        """Verify image input for the selected model without choosing another model.
+
+        Screenshots are stricter than ordinary local inference: a private-LAN endpoint is
+        not enough because pixels must not leave this computer.  Only loopback is allowed.
+        """
+        hostname = urlparse(self.base_url).hostname or ""
+        if not _loopback_host(hostname):
+            return False, "Screenshot vision requires Ollama on this computer (loopback only)"
+        status = self.probe()
+        if not status.connected:
+            return False, status.error or "Ollama is unavailable"
+        if not status.installed:
+            return False, status.error or f"Model {self.model} is not installed"
+        try:
+            body = self._request("POST", "/api/show", {"model": self.model}, timeout=3.0)
+        except OllamaError as exc:
+            return False, f"Cannot inspect image capability: {exc}"
+        capabilities = {
+            str(value).strip().casefold() for value in body.get("capabilities", [])
+        }
+        if "vision" not in capabilities:
+            return False, f"Selected model {self.model} does not report Ollama vision capability"
+        return True, ""
+
+    def vision_json(self, prompt: str, images: list[bytes], token: CancellationToken,
+                    *, schema: dict) -> dict:
+        """Run one cancellable structured image request against loopback Ollama only."""
+        ready, reason = self.vision_status()
+        if not ready:
+            raise OllamaError(reason)
+        if not images or any(not isinstance(item, (bytes, bytearray)) or not item for item in images):
+            raise OllamaError("Vision request contains no valid in-memory screenshot")
+        token.raise_if_cancelled()
+        encoded = [base64.b64encode(bytes(item)).decode("ascii") for item in images]
+        payload = {
+            "model": self.model,
+            "messages": [{
+                "role": "user", "content": str(prompt), "images": encoded,
+            }],
+            "format": schema,
+            "stream": True,
+            "think": False,
+            "keep_alive": self.cfg.get("ollama_keep_alive", "10m"),
+            "options": {
+                "num_ctx": int(self.cfg.get("ollama_context", 8192)),
+                "temperature": 0,
+            },
+        }
+        response = self._stream_chat(payload, token)
+        token.raise_if_cancelled()
+        content = str((response.get("message") or {}).get("content") or "")
+        try:
+            value = json.loads(content)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise OllamaError("Local vision model returned invalid structured JSON") from exc
+        if not isinstance(value, dict):
+            raise OllamaError("Local vision model returned a non-object result")
+        return value
+
     def _stream_chat(self, payload: dict, token: CancellationToken) -> dict:
         request = urllib.request.Request(
             self.base_url + "/api/chat",
@@ -160,6 +221,15 @@ def _local_host(host: str) -> bool:
     except ValueError:
         return host.lower().endswith(".local")
     return value.is_loopback or value.is_private or value.is_link_local
+
+
+def _loopback_host(host: str) -> bool:
+    if host.casefold() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
 
 
 def _model_matches(requested: str, installed: tuple[str, ...]) -> bool:

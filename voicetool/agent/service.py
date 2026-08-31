@@ -8,6 +8,7 @@ from collections import Counter
 
 from .action_log import ActivityLogger
 from .cancellation import AgentCancelled, CancellationToken
+from .computer import DesktopComputer
 from .desktop import DesktopController
 from .ollama import OllamaError, OllamaProvider
 from .provider import LocalModelProvider
@@ -18,6 +19,8 @@ from .steam import SteamController
 from .tools import ToolRegistry
 from .types import (AgentEvent, AgentResult, AgentStatus, ConfirmationRequest, ToolCall,
                     ToolResult)
+from .uia import UIAutomationController
+from .vision import LocalVisionFallback, VISION_BOUNDARY
 
 log = logging.getLogger(__name__)
 
@@ -27,25 +30,34 @@ Observe every structured tool result before choosing the next action; recover sa
 a failed step and never claim success after a failed action. Confirmation is enforced by
 the application immediately before a high-impact tool and cannot be pre-approved.
 {PROMPT_INJECTION_BOUNDARY}
+Automation priority is strict: native API and application/window tools first, then Windows
+UI Automation, then a known safe keyboard shortcut. visual_interact is the final fallback
+and is blocked until UIA or keyboard has failed. Never request raw screenshot or coordinate
+actions; they are private to the bounded visual subsystem. {VISION_BOUNDARY}
 Use short-term context only to resolve references. Keep the final response concise."""
 
 
 class DesktopAgentService:
     def __init__(self, cfg, *, events=None, automation=None, steam=None,
                  provider: LocalModelProvider | None = None, policy=None,
-                 activity_logger=None):
+                 activity_logger=None, uia=None, screen=None, computer=None, visual=None):
         self.cfg = cfg
         self.events = events or {}
         self.session = AgentSession()
         self.automation = automation or DesktopController(cfg)
         self.steam = steam or SteamController(cfg)
         self.provider = provider or OllamaProvider(cfg)
+        self.uia = uia or UIAutomationController()
+        self.computer = computer or DesktopComputer(
+            screen=screen, input_controller=self.automation)
+        self.visual = visual or LocalVisionFallback(cfg, self.computer, self.provider)
         self.policy = policy or ConfirmationPolicy()
         self.activity_log = activity_logger or ActivityLogger(
             cfg.data_dir, include_command=bool(cfg.get("log_transcripts", True)))
         self.registry = ToolRegistry(
             self.automation, steam=self.steam, policy=self.policy,
             activity_logger=self.activity_log,
+            uia=self.uia, computer=self.computer, visual=self.visual,
         )
         self.router = VoiceCommandRouter(cfg, self.session)
         self._run_lock = threading.Lock()
@@ -168,6 +180,7 @@ class DesktopAgentService:
         ]
         steps = []
         failures = Counter()
+        visual_fallback_ready = False
         max_steps = max(1, min(32, int(self.cfg.get("max_agent_steps", 8))))
 
         # One final model turn is allowed after the last permitted tool so it can report
@@ -196,9 +209,12 @@ class DesktopAgentService:
                 token.raise_if_cancelled()
                 if len(steps) >= max_steps:
                     return self._step_limit(command, max_steps, steps)
-                result = self._execute_tool(command, call, token)
+                result = self._execute_tool(
+                    command, call, token, allow_visual=visual_fallback_ready)
                 steps.append(result)
                 self.session.remember_tool(call.name, call.arguments, result)
+                if not result.success and self.registry.tier(call.name) in {3, 4}:
+                    visual_fallback_ready = True
                 signature = call.name + json.dumps(call.arguments, sort_keys=True,
                                                    ensure_ascii=False)
                 if not result.success:
@@ -211,10 +227,13 @@ class DesktopAgentService:
 
         return self._step_limit(command, max_steps, steps)
 
-    def _execute_tool(self, command, call, token):
+    def _execute_tool(self, command, call, token, *, allow_visual=False):
         self._event(AgentStatus.EXECUTING, f"Выполняю {call.name}…", tool=call.name)
         result = self.registry.execute(
-            call, token, command=command, confirm=lambda request: self._confirm(request, token))
+            call, token, command=command,
+            confirm=lambda request: self._confirm(request, token),
+            allow_visual=allow_visual,
+        )
         self._event(AgentStatus.EXECUTING if result.success else AgentStatus.ERROR,
                     result.message, tool=call.name, success=result.success)
         return result
