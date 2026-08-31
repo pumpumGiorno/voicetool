@@ -24,6 +24,8 @@ for package in ("ctranslate2", "av", "onnxruntime", "sounddevice", "sentencepiec
 datas += collect_data_files("onnxruntime")
 hiddenimports += collect_submodules("av")
 hiddenimports += ["ctranslate2", "sentencepiece", "onnxruntime", "sounddevice"]
+hiddenimports += collect_submodules("pycaw")
+hiddenimports += collect_submodules("comtypes")
 
 # лишнее в сборке: тянет сотни мегабайт и не используется
 excludes = [

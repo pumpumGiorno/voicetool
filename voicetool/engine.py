@@ -19,6 +19,8 @@ import threading
 import time
 
 from .audio import Recorder, file_frames, mic_frames
+from .agent import DesktopAgentService
+from .agent.types import AgentResult, AgentStatus
 from .counter import WordCounter, append_log
 from .history import History
 from .text import count_words, find_wake_word
@@ -34,6 +36,11 @@ RECORDING = "recording"
 THINKING = "thinking"  # идёт распознавание
 DONE = "done"
 PAUSED = "paused"
+UNDERSTANDING = "understanding"
+EXECUTING = "executing"
+SUCCESS = "success"
+ERROR = "error"
+CANCELLED = "cancelled"
 
 
 class Listener:
@@ -53,6 +60,7 @@ class Listener:
         self._force = threading.Event()  # горячая клавиша: слушать команду без слова-триггера
         self._asr = None
         self._wake_asr = None
+        self._agent = None
         self.state = IDLE
 
     # --- управление ---------------------------------------------------------
@@ -73,6 +81,7 @@ class Listener:
         """wait с запасом: поток может доигрывать фразу, а микрофон нужно освободить
         до того, как его откроет новый слушатель."""
         self._stop.set()
+        self.cancel_agent("Прослушивание остановлено")
         thread = self._thread
         if thread and thread.is_alive() and threading.current_thread() is not thread:
             thread.join(timeout=wait)
@@ -94,6 +103,18 @@ class Listener:
             return False
         self._force.set()
         return True
+
+    @property
+    def agent_running(self) -> bool:
+        return bool(self._agent and self._agent.running)
+
+    def cancel_agent(self, reason="Остановлено пользователем") -> bool:
+        return bool(self._agent and self._agent.cancel(reason))
+
+    def reset_agent(self):
+        """Reload Local Agent settings without touching the Whisper pipeline."""
+        self.cancel_agent("Настройки Local Agent изменены")
+        self._agent = None
 
     # --- события ------------------------------------------------------------
 
@@ -219,10 +240,44 @@ class Listener:
             append_log(self.cfg.data_dir, command)
         self._emit("counter", self.counter.total, added)
         self._emit("recognized", command, added)
+        result = self._dispatch_command(command)
+        if result and result.handled:
+            self.history.add(result.message, kind="agent", source=command)
+            self._emit("agent_result", result)
+            state = SUCCESS if result.success else (
+                CANCELLED if result.status.value == "cancelled" else ERROR)
+            self._emit_state(state, result.message)
+            return
+
         self._emit_state(DONE, command)
 
         if self.cfg.output_mode in ("insert", "insert_show"):
             self._insert(command, wake_window)
+
+    def _dispatch_command(self, command):
+        """The sole hand-off point after STT and before ordinary text insertion."""
+        if not self.cfg.get("agent_enabled", True):
+            return None
+        if self._agent is None:
+            try:
+                self._agent = DesktopAgentService(
+                    self.cfg, events={"event": self._on_agent_event})
+            except (TypeError, ValueError) as exc:
+                message = f"Некорректные настройки Local Agent: {exc}"
+                return AgentResult(True, False, AgentStatus.ERROR, message, command=command)
+        return self._agent.execute(command, source="voice")
+
+    def _on_agent_event(self, event):
+        state = {
+            AgentStatus.UNDERSTANDING: UNDERSTANDING,
+            AgentStatus.EXECUTING: EXECUTING,
+            AgentStatus.SUCCESS: SUCCESS,
+            AgentStatus.ERROR: ERROR,
+            AgentStatus.CANCELLED: CANCELLED,
+        }.get(event.status)
+        if state:
+            self._emit_state(state, event.message)
+        self._emit("agent_event", event)
 
     def _hotwords(self):
         """Подсказка модели из пользовательского словаря — или ничего."""

@@ -84,6 +84,8 @@ def build(onefile=False):
         for package in ("faster_whisper", "sounddevice", "sentencepiece", "tokenizers",
                         "onnxruntime"):
             args += ["--collect-data", package]
+        for package in ("pycaw", "comtypes"):
+            args += ["--collect-submodules", package]
         for package in ("ctranslate2", "av", "onnxruntime", "sounddevice", "sentencepiece"):
             args += ["--collect-binaries", package]
         for module in ("tkinter", "matplotlib", "scipy", "pandas",

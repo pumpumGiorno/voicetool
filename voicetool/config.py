@@ -64,6 +64,20 @@ DEFAULTS = {
     # (Блокнот Windows 11). Меньше — быстрее, но часть приложений начнёт терять символы.
     "type_delay_ms": 15,
 
+    # --- локальный desktop agent (Stage 1) ---
+    # smart: точные desktop-команды идут через deterministic fast path, обычный
+    # текст остаётся диктовкой, неоднозначные action-like фразы проверяет Ollama.
+    "agent_enabled": True,
+    "voice_mode": "smart",       # smart | dictation | agent
+    "ollama_url": "http://127.0.0.1:11434",
+    "ollama_model": "qwen3.5:9b",
+    "ollama_context": 8192,
+    "ollama_temperature": 0.1,
+    "ollama_timeout_seconds": 90,
+    "ollama_keep_alive": "10m",
+    "max_agent_steps": 8,
+    "strict_local_ai": True,
+
     # --- интерфейс ---
     "show_floating_widget": True,
     "minimize_to_tray": True,
