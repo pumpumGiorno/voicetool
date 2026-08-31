@@ -4,6 +4,8 @@ Listener и BatchProcessor живут в своих потоках и зовут
 из чужого потока нельзя, поэтому колбэки превращаются здесь в сигналы: Qt сам перекинет
 их в поток интерфейса (очередь событий).
 """
+import threading
+
 from PySide6.QtCore import QObject, Signal
 
 from ..engine import Listener
@@ -18,6 +20,10 @@ class ListenerBridge(QObject):
     counter = Signal(int, int)      # всего, добавлено
     status = Signal(str)
     error = Signal(str)
+    agent_event = Signal(object)
+    agent_result = Signal(object)
+    confirmation = Signal(object)
+    command_finished = Signal(object)
 
     def __init__(self, cfg, parent=None, source=None):
         super().__init__(parent)
@@ -29,6 +35,9 @@ class ListenerBridge(QObject):
             "counter": self.counter.emit,
             "status": self.status.emit,
             "error": self.error.emit,
+            "agent_event": self.agent_event.emit,
+            "agent_result": self.agent_result.emit,
+            "confirmation": self.confirmation.emit,
         })
 
     # тонкие обёртки, чтобы окна не лезли внутрь Listener
@@ -43,6 +52,27 @@ class ListenerBridge(QObject):
 
     def set_paused(self, value):
         self.listener.set_paused(value)
+
+    def execute_command(self, command):
+        """Run a typed command off the Qt thread through the existing agent service."""
+        text = str(command or "").strip()
+        if not text:
+            return
+
+        def run():
+            result = self.listener.execute_agent(text)
+            self.command_finished.emit(result)
+
+        threading.Thread(target=run, name="voicetool-ui-agent", daemon=True).start()
+
+    def cancel_agent(self, reason="Остановлено пользователем"):
+        return self.listener.cancel_agent(reason)
+
+    def resolve_confirmation(self, approved):
+        return self.listener.resolve_agent_confirmation(approved)
+
+    def reset_agent(self):
+        self.listener.reset_agent()
 
     @property
     def running(self):

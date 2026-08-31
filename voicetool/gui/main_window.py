@@ -8,30 +8,38 @@ import ctypes.wintypes
 import sys
 
 from PySide6.QtCore import QPoint, QRect, Qt, Signal
-from PySide6.QtGui import QCursor, QIcon
-from PySide6.QtWidgets import (QButtonGroup, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
-                               QStackedWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (
+    QButtonGroup,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from .. import engine
 from . import theme
+from .page_agent import AgentPage
+from .page_applications import ApplicationsPage
 from .page_check import CheckPage
 from .page_files import FilesPage
 from .page_history import HistoryPage
 from .page_home import HomePage
 from .page_settings import SettingsPage
 from .page_stats import StatsPage
-from .widgets import app_icon, divider, label, shadow
+from .widgets import app_icon, label, shadow
 
 BORDER = 6  # ширина зоны захвата для изменения размера
 
 PAGES = [
-    ("home", "Главная"),
-    ("files", "Файлы"),
-    ("stats", "Статистика"),
-    ("history", "История"),
-    ("settings", "Настройки"),
-    ("check", "Проверка"),
+    ("home", "Home"),
+    ("agent", "Agent"),
+    ("history", "History"),
+    ("applications", "Applications"),
+    ("settings", "Settings"),
 ]
+AUX_PAGES = ("files", "stats", "check")
 
 
 class MainWindow(QWidget):
@@ -42,12 +50,12 @@ class MainWindow(QWidget):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
-        self.setWindowTitle("Voice Tool")
+        self.setWindowTitle("Alice")
         self.setWindowIcon(app_icon())
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.resize(1000, 720)
-        self.setMinimumSize(860, 620)
+        self.resize(1120, 760)
+        self.setMinimumSize(920, 640)
         self._drag_offset = None
 
         wrapper = QVBoxLayout(self)
@@ -70,9 +78,11 @@ class MainWindow(QWidget):
         self.stack = QStackedWidget()
         self.pages = {
             "home": HomePage(cfg),
+            "agent": AgentPage(cfg),
             "files": FilesPage(cfg),
             "stats": StatsPage(cfg),
             "history": HistoryPage(cfg),
+            "applications": ApplicationsPage(cfg),
             "settings": SettingsPage(cfg),
             "check": CheckPage(cfg),
         }
@@ -81,6 +91,8 @@ class MainWindow(QWidget):
         content_lay.setContentsMargins(24, 22, 24, 20)
         content_lay.addWidget(self.stack)
         for key, _ in PAGES:
+            self.stack.addWidget(self.pages[key])
+        for key in AUX_PAGES:
             self.stack.addWidget(self.pages[key])
         body.addWidget(content, 1)
         outer.addLayout(body, 1)
@@ -98,9 +110,9 @@ class MainWindow(QWidget):
         lay.setContentsMargins(18, 0, 8, 0)
         lay.setSpacing(10)
 
-        dot = QLabel("◉")
-        dot.setStyleSheet(f"color: {theme.ACCENT}; font-size: 14px;")
-        title = QLabel("VOICE TOOL")
+        dot = QLabel("●")
+        dot.setStyleSheet(f"color: {theme.ACCENT}; font-size: 9px;")
+        title = QLabel("ALICE")
         title.setObjectName("AppTitle")
         lay.addWidget(dot)
         lay.addWidget(title)
@@ -126,7 +138,7 @@ class MainWindow(QWidget):
     def _sidebar(self):
         side = QWidget()
         side.setObjectName("Sidebar")
-        side.setFixedWidth(196)
+        side.setFixedWidth(176)
         lay = QVBoxLayout(side)
         lay.setContentsMargins(12, 16, 12, 14)
         lay.setSpacing(4)
@@ -135,7 +147,7 @@ class MainWindow(QWidget):
         self.nav_group.setExclusive(True)
         self.nav_buttons = {}
         for key, title in PAGES:
-            btn = QPushButton(f"  {title}")
+            btn = QPushButton(title)
             btn.setObjectName("NavBtn")
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
@@ -165,7 +177,13 @@ class MainWindow(QWidget):
 
     def show_page(self, key):
         self.stack.setCurrentWidget(self.pages[key])
-        self.nav_buttons[key].setChecked(True)
+        if key in self.nav_buttons:
+            self.nav_buttons[key].setChecked(True)
+        else:
+            self.nav_group.setExclusive(False)
+            for button in self.nav_buttons.values():
+                button.setChecked(False)
+            self.nav_group.setExclusive(True)
         refresh = getattr(self.pages[key], "refresh", None)
         if refresh:
             refresh()
@@ -177,9 +195,14 @@ class MainWindow(QWidget):
         titles = {engine.IDLE: "микрофон выключен", engine.WAITING: "жду «{w}»",
                   engine.WAKE: "слушаю", engine.RECORDING: "запись",
                   engine.THINKING: "распознаю", engine.DONE: "жду «{w}»",
-                  engine.PAUSED: "пауза"}
+                  engine.PAUSED: "пауза", engine.UNDERSTANDING: "обрабатываю",
+                  engine.EXECUTING: "выполняю",
+                  engine.WAITING_CONFIRMATION: "нужно подтверждение",
+                  engine.SUCCESS: "готово", engine.ERROR: "ошибка",
+                  engine.CANCELLED: "отменено"}
         text = titles.get(state, "").format(w=self.cfg.wake_word)
-        color = theme.ACCENT if state not in (engine.IDLE, engine.PAUSED) else theme.MUTED
+        color = (theme.MUTED if state in (engine.IDLE, engine.PAUSED)
+                 else theme.state_color(state))
         self.mic_pill.setText(text)
         self.mic_pill.setStyleSheet(f"color: {color}; font-size: 12px;")
 

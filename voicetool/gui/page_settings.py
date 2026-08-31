@@ -61,19 +61,20 @@ class SettingsPage(QWidget):
         scroll.setWidget(body)
         outer.addWidget(scroll, 1)
 
-        root.addWidget(self._voice_section())
         root.addWidget(self._output_section())
+        root.addWidget(self._voice_section())
         root.addWidget(self._whisper_section())
         root.addWidget(self._vocabulary_section())
         root.addWidget(self._ui_section())
         root.addWidget(self._translate_section())
+        root.addWidget(self._advanced_section())
         root.addStretch()
         self.load()
 
     # --- секции -------------------------------------------------------------
 
     def _form(self, title):
-        frame, lay = card(padding=18, spacing=12)
+        frame, lay = card(padding=18, spacing=12, name="QuietSurface")
         lay.addWidget(section(title))
         form = QFormLayout()
         form.setSpacing(10)
@@ -83,7 +84,7 @@ class SettingsPage(QWidget):
         return frame, lay, form
 
     def _voice_section(self):
-        frame, lay, form = self._form("Голосовой режим")
+        frame, lay, form = self._form("Voice")
         self.fields["wake_word"] = QLineEdit()
         self.fields["wake_word"].setPlaceholderText("алиса")
         form.addRow("Слово-триггер", self.fields["wake_word"])
@@ -122,7 +123,7 @@ class SettingsPage(QWidget):
         return frame
 
     def _output_section(self):
-        frame, lay, form = self._form("Куда попадает распознанный текст")
+        frame, lay, form = self._form("General")
         self.mode_buttons = {}
         for value, title in OUTPUT_MODES:
             radio = QRadioButton(title)
@@ -155,7 +156,7 @@ class SettingsPage(QWidget):
         return frame
 
     def _whisper_section(self):
-        frame, lay, form = self._form("Whisper")
+        frame, lay, form = self._form("AI Engine")
         self.fields["model"] = QComboBox()
         for m in MODELS:
             self.fields["model"].addItem(f"{m}  —  {MODEL_HINT[m]}", m)
@@ -198,7 +199,7 @@ class SettingsPage(QWidget):
         return frame
 
     def _vocabulary_section(self):
-        frame, lay, form = self._form("Словарь имён и редких слов")
+        frame, lay, form = self._form("Applications")
         self.fields["use_vocabulary"] = QCheckBox(
             "Подсказывать модели слова из словаря (меньше искажённых имён)")
         lay.addWidget(self.fields["use_vocabulary"])
@@ -226,12 +227,13 @@ class SettingsPage(QWidget):
         open_path(vocab.ensure_file())
 
     def _ui_section(self):
-        frame, lay, form = self._form("Интерфейс и фон")
+        frame, lay, form = self._form("Appearance")
         for key, title in (
             ("start_with_windows", "Запускать Voice Tool вместе с Windows"),
             ("minimize_to_tray", "При закрытии окна сворачивать в трей (работать в фоне)"),
             ("show_floating_widget", "Показывать голосовой индикатор поверх окон"),
             ("show_notifications", "Показывать уведомления"),
+            ("reduce_animations", "Уменьшить анимации"),
             ("start_listening_on_launch", "Включать прослушивание сразу при запуске"),
             ("hotkey_enabled", "Включить горячую клавишу"),
         ):
@@ -254,7 +256,7 @@ class SettingsPage(QWidget):
         return frame
 
     def _translate_section(self):
-        frame, lay, form = self._form("Перевод")
+        frame, lay, form = self._form("Privacy")
         self.fields["translator"] = QCheckBox("Переводить иностранную речь на русский")
         lay.addWidget(self.fields["translator"])
         self.fields["translate_offline_only"] = QCheckBox(
@@ -265,6 +267,14 @@ class SettingsPage(QWidget):
         lay.addWidget(label("Аудио никогда не отправляется в интернет. Сеть нужна один раз — "
                             "чтобы скачать модель распознавания или пару языков для перевода.",
                             name="Dim", wrap=True))
+        return frame
+
+    def _advanced_section(self):
+        frame, lay, form = self._form("Advanced")
+        lay.addWidget(label(
+            "Расширенные лимиты Local Agent и проверка Ollama находятся на странице Agent. "
+            "Изменяйте их только если понимаете влияние на скорость и безопасность.",
+            name="Dim", wrap=True))
         return frame
 
     # --- данные -------------------------------------------------------------
@@ -312,6 +322,7 @@ class SettingsPage(QWidget):
         self.mode_buttons[mode].setChecked(True)
         for key in ("insert_into_wake_window", "press_enter",
                     "minimize_to_tray", "show_floating_widget", "show_notifications",
+                    "reduce_animations",
                     "start_listening_on_launch", "hotkey_enabled", "translate_offline_only",
                     "log_transcripts", "use_vocabulary"):
             self.fields[key].setChecked(bool(cfg[key]))
@@ -349,6 +360,7 @@ class SettingsPage(QWidget):
             values[key] = round(self.fields[key].value(), 2)
         for key in ("insert_into_wake_window", "press_enter",
                     "minimize_to_tray", "show_floating_widget", "show_notifications",
+                    "reduce_animations",
                     "start_listening_on_launch", "hotkey_enabled", "translate_offline_only",
                     "log_transcripts", "use_vocabulary"):
             values[key] = self.fields[key].isChecked()

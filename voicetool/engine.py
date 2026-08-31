@@ -117,6 +117,17 @@ class Listener:
         self.cancel_agent("Настройки Local Agent изменены")
         self._agent = None
 
+    def execute_agent(self, command):
+        """Public UI hand-off for a typed command.
+
+        It deliberately uses the same service, router, confirmation policy and activity
+        log as voice commands; Stage 5 does not introduce a parallel agent backend.
+        """
+        return self._dispatch_command(str(command or "").strip())
+
+    def resolve_agent_confirmation(self, approved):
+        return bool(self._agent and self._agent.resolve_confirmation(bool(approved)))
+
     # --- события ------------------------------------------------------------
 
     def _emit(self, name, *args):

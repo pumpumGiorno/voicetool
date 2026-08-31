@@ -90,6 +90,7 @@ DEFAULTS = {
     "show_floating_widget": True,
     "minimize_to_tray": True,
     "show_notifications": True,
+    "reduce_animations": False,
     "start_with_windows": False,   # намеренно выключено: автозапуск включает пользователь
     "start_listening_on_launch": False,
     "hotkey": "Ctrl+Alt+A",
