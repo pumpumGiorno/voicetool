@@ -78,8 +78,10 @@ DEFAULTS = {
     "max_agent_steps": 8,
     "strict_local_ai": True,
     "app_launch_timeout_seconds": 5.0,
+    "steam_launch_timeout_seconds": 20.0,
     "app_resolver_cache_seconds": 180,
     "allowed_url_schemes": [],   # custom schemes; http/https are always allowed
+    "confirmation_timeout_seconds": 120.0,
 
     # --- интерфейс ---
     "show_floating_widget": True,

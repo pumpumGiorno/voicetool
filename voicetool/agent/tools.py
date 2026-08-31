@@ -1,11 +1,15 @@
-"""Typed Stage 2 registry: native tools only, never arbitrary process execution."""
+"""Typed Stage 3 registry with central confirmation and activity logging."""
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from .action_log import ActivityLogger
 from .cancellation import AgentCancelled, CancellationToken
-from .types import ErrorCode, ToolCall, ToolResult
+from .safety import ConfirmationPolicy
+from .steam import SteamController
+from .types import ConfirmationRequest, ErrorCode, ToolCall, ToolResult
 
 
 @dataclass(frozen=True)
@@ -23,8 +27,11 @@ class ToolSpec:
 
 
 class ToolRegistry:
-    def __init__(self, controller):
+    def __init__(self, controller, *, steam=None, policy=None, activity_logger=None):
         self.controller = controller
+        self.steam = steam or SteamController(getattr(controller, "cfg", {}))
+        self.policy = policy or ConfirmationPolicy()
+        self.activity_logger: ActivityLogger | None = activity_logger
         self._tools: dict[str, ToolSpec] = {}
         self._register_defaults()
 
@@ -35,21 +42,60 @@ class ToolRegistry:
     def schemas(self):
         return [spec.ollama_schema() for spec in self._tools.values()]
 
-    def execute(self, call: ToolCall, token: CancellationToken) -> ToolResult:
+    def execute(self, call: ToolCall, token: CancellationToken, *, command="", confirm=None) -> ToolResult:
+        started = time.perf_counter()
+        confirmation = "not_required"
         token.raise_if_cancelled()
         spec = self._tools.get(str(call.name))
         if not spec:
-            result = ToolResult.fail(ErrorCode.UNSUPPORTED_ACTION,
-                                     f"Неизвестный tool: {call.name}")
-            result.tool = str(call.name)
-            return result
+            result = ToolResult.fail(ErrorCode.UNSUPPORTED_ACTION, f"Неизвестный tool: {call.name}")
+            return self._finish(call, result, started, command, confirmation)
+
         try:
             arguments = validate_arguments(spec.parameters, call.arguments)
+        except ValueError as exc:
+            result = ToolResult.fail(ErrorCode.INVALID_ARGUMENT, str(exc))
+            return self._finish(call, result, started, command, confirmation)
+
+        needs_confirmation, reason = self.policy.needs_confirmation(call.name, arguments)
+        if needs_confirmation:
+            if confirm is None:
+                confirmation = "unavailable"
+                result = ToolResult.fail(
+                    ErrorCode.CONFIRMATION_REQUIRED,
+                    "Действие требует непосредственного подтверждения пользователя",
+                )
+                return self._finish(call, result, started, command, confirmation)
+            request = ConfirmationRequest(
+                call.name, arguments, reason or f"Подтвердите действие {call.name}",
+            )
+            try:
+                approved = bool(confirm(request))
+            except AgentCancelled as exc:
+                confirmation = "cancelled"
+                result = ToolResult.fail(ErrorCode.CANCELLED, str(exc) or "Отменено")
+                self._finish(call, result, started, command, confirmation, arguments)
+                raise
+            except TimeoutError as exc:
+                confirmation = "timed_out"
+                result = ToolResult.fail(ErrorCode.ACTION_TIMEOUT, str(exc))
+                return self._finish(call, result, started, command, confirmation)
+            if not approved:
+                confirmation = "rejected"
+                result = ToolResult.fail(
+                    ErrorCode.CONFIRMATION_REJECTED, "Действие отменено пользователем",
+                )
+                return self._finish(call, result, started, command, confirmation)
+            confirmation = "approved"
+
+        try:
             token.raise_if_cancelled()
             output = (spec.handler(token=token, **arguments) if spec.needs_token
                       else spec.handler(**arguments))
             result = output if isinstance(output, ToolResult) else ToolResult.ok(data=output or {})
-        except AgentCancelled:
+        except AgentCancelled as exc:
+            cancelled = ToolResult.fail(ErrorCode.CANCELLED, str(exc) or "Отменено")
+            self._finish(call, cancelled, started, command, confirmation, arguments)
             raise
         except ValueError as exc:
             result = ToolResult.fail(ErrorCode.INVALID_ARGUMENT, str(exc))
@@ -57,7 +103,16 @@ class ToolRegistry:
             result = ToolResult.fail(ErrorCode.ACCESS_DENIED, str(exc))
         except Exception as exc:
             result = ToolResult.fail(ErrorCode.UNSUPPORTED_ACTION, f"{call.name}: {exc}")
+        return self._finish(call, result, started, command, confirmation, arguments)
+
+    def _finish(self, call, result, started, command, confirmation, arguments=None):
         result.tool = str(call.name)
+        result.duration_ms = max(0, int((time.perf_counter() - started) * 1000))
+        if self.activity_logger:
+            self.activity_logger.write(
+                command, call.name, call.arguments if arguments is None else arguments,
+                result, confirmation=confirmation,
+            )
         return result
 
     def _add(self, name, description, properties=None, required=(), handler=None,
@@ -72,6 +127,10 @@ class ToolRegistry:
 
         def integer(description, low, high):
             return {"type": "integer", "description": description,
+                    "minimum": low, "maximum": high}
+
+        def number(description, low, high):
+            return {"type": "number", "description": description,
                     "minimum": low, "maximum": high}
 
         def array(description):
@@ -110,7 +169,7 @@ class ToolRegistry:
                   {"url": string("http/https URL", 4096)}, ("url",), c.open_url)
         self._add("type_text", "Type Unicode text with Windows Unicode input, not clipboard.",
                   {"text": string("Unicode text", 20_000)}, ("text",), c.type_text)
-        self._add("press_key", "Press one non-submit keyboard key.",
+        self._add("press_key", "Press one validated non-submit keyboard key.",
                   {"key": string("Supported key name", 32)}, ("key",), c.press_key)
         self._add("press_keys", "Press a validated non-submit keyboard shortcut.",
                   {"keys": array("Ordered key names")}, ("keys",), c.press_keys)
@@ -138,6 +197,27 @@ class ToolRegistry:
         self._add("show_in_folder", "Reveal an existing file in Windows Explorer.",
                   {"path": string("Existing path", 32_000)}, ("path",), c.show_in_folder)
 
+        self._add("get_installed_steam_games",
+                  "List locally installed Steam games parsed from app manifests.",
+                  handler=self.steam.get_installed)
+        self._add("resolve_steam_game",
+                  "Resolve an installed Steam game name to a verified App ID.",
+                  {"game_name": string("Steam game name")}, ("game_name",),
+                  self.steam.resolve_game)
+        self._add("launch_steam_game",
+                  "Launch an installed game using its numeric steam://run App ID.",
+                  {"game_name": string("Steam game name")}, ("game_name",),
+                  self.steam.launch_game, needs_token=True)
+        self._add("wait", "Wait briefly for a process or window transition.", {
+            "seconds": number("Seconds to wait", 0.05, 15.0),
+        }, ("seconds",), _wait, needs_token=True)
+
+
+def _wait(seconds: float, token: CancellationToken) -> ToolResult:
+    if token.wait(float(seconds)):
+        token.raise_if_cancelled()
+    return ToolResult.ok(f"Ожидание {seconds:g} с завершено")
+
 
 def validate_arguments(schema: dict, arguments: Any) -> dict:
     if not isinstance(arguments, dict):
@@ -161,6 +241,11 @@ def validate_arguments(schema: dict, arguments: Any) -> dict:
         elif expected == "integer":
             if isinstance(value, bool) or not isinstance(value, int):
                 raise ValueError(f"{name}: ожидалось целое число")
+            if value < rule["minimum"] or value > rule["maximum"]:
+                raise ValueError(f"{name}: значение вне допустимого диапазона")
+        elif expected == "number":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{name}: ожидалось число")
             if value < rule["minimum"] or value > rule["maximum"]:
                 raise ValueError(f"{name}: значение вне допустимого диапазона")
         elif expected == "array":

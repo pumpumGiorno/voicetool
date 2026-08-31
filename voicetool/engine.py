@@ -38,6 +38,7 @@ DONE = "done"
 PAUSED = "paused"
 UNDERSTANDING = "understanding"
 EXECUTING = "executing"
+WAITING_CONFIRMATION = "waiting_confirmation"
 SUCCESS = "success"
 ERROR = "error"
 CANCELLED = "cancelled"
@@ -261,7 +262,10 @@ class Listener:
         if self._agent is None:
             try:
                 self._agent = DesktopAgentService(
-                    self.cfg, events={"event": self._on_agent_event})
+                    self.cfg, events={
+                        "event": self._on_agent_event,
+                        "confirmation": lambda request: self._emit("confirmation", request),
+                    })
             except (TypeError, ValueError) as exc:
                 message = f"Некорректные настройки Local Agent: {exc}"
                 return AgentResult(True, False, AgentStatus.ERROR, message, command=command)
@@ -271,6 +275,7 @@ class Listener:
         state = {
             AgentStatus.UNDERSTANDING: UNDERSTANDING,
             AgentStatus.EXECUTING: EXECUTING,
+            AgentStatus.WAITING_CONFIRMATION: WAITING_CONFIRMATION,
             AgentStatus.SUCCESS: SUCCESS,
             AgentStatus.ERROR: ERROR,
             AgentStatus.CANCELLED: CANCELLED,

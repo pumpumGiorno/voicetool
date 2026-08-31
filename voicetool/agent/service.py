@@ -1,60 +1,89 @@
-"""Single coordinator for routing, local inference and typed desktop tools."""
+"""Single coordinator for routing, bounded local inference and typed desktop tools."""
 from __future__ import annotations
 
 import json
 import logging
 import threading
+from collections import Counter
 
+from .action_log import ActivityLogger
 from .cancellation import AgentCancelled, CancellationToken
 from .desktop import DesktopController
 from .ollama import OllamaError, OllamaProvider
 from .provider import LocalModelProvider
 from .router import RouteKind, VoiceCommandRouter
+from .safety import ConfirmationPolicy, PROMPT_INJECTION_BOUNDARY, safe_arguments
 from .session import AgentSession
+from .steam import SteamController
 from .tools import ToolRegistry
-from .types import AgentEvent, AgentResult, AgentStatus, ToolCall
+from .types import (AgentEvent, AgentResult, AgentStatus, ConfirmationRequest, ToolCall,
+                    ToolResult)
 
 log = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT = """You are Alice, a local Windows desktop agent. Use only the provided
+_SYSTEM_PROMPT = f"""You are Alice, a local Windows desktop agent. Use only the provided
 typed tools. Never produce shell, PowerShell, cmd, scripts or operating-system commands.
-Observe structured tool results and do not claim success after a failed tool. Use the
-short-term context only to resolve references. Keep the response concise."""
+Observe every structured tool result before choosing the next action; recover safely after
+a failed step and never claim success after a failed action. Confirmation is enforced by
+the application immediately before a high-impact tool and cannot be pre-approved.
+{PROMPT_INJECTION_BOUNDARY}
+Use short-term context only to resolve references. Keep the final response concise."""
 
 
 class DesktopAgentService:
-    def __init__(self, cfg, *, events=None, automation=None,
-                 provider: LocalModelProvider | None = None):
+    def __init__(self, cfg, *, events=None, automation=None, steam=None,
+                 provider: LocalModelProvider | None = None, policy=None,
+                 activity_logger=None):
         self.cfg = cfg
         self.events = events or {}
         self.session = AgentSession()
         self.automation = automation or DesktopController(cfg)
+        self.steam = steam or SteamController(cfg)
         self.provider = provider or OllamaProvider(cfg)
-        self.registry = ToolRegistry(self.automation)
+        self.policy = policy or ConfirmationPolicy()
+        self.activity_log = activity_logger or ActivityLogger(
+            cfg.data_dir, include_command=bool(cfg.get("log_transcripts", True)))
+        self.registry = ToolRegistry(
+            self.automation, steam=self.steam, policy=self.policy,
+            activity_logger=self.activity_log,
+        )
         self.router = VoiceCommandRouter(cfg, self.session)
         self._run_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._active_token: CancellationToken | None = None
+        self._pending_confirmation: ConfirmationRequest | None = None
 
     @property
     def running(self) -> bool:
         with self._state_lock:
             return self._active_token is not None
 
+    @property
+    def pending_confirmation(self) -> ConfirmationRequest | None:
+        with self._state_lock:
+            return self._pending_confirmation
+
     def diagnostics(self):
-        """Safe for startup/settings checks: an absent server becomes status, not an exception."""
         return self.provider.probe()
+
+    def resolve_confirmation(self, approved: bool) -> bool:
+        with self._state_lock:
+            request = self._pending_confirmation
+        return bool(request and request.resolve(bool(approved)))
 
     def cancel(self, reason="Остановлено пользователем") -> bool:
         with self._state_lock:
             token = self._active_token
+            request = self._pending_confirmation
         if token is None:
             return False
         token.cancel(reason)
+        if request:
+            request.resolve(False)
         return True
 
     def execute(self, command: str, *, source="voice") -> AgentResult:
-        del source  # reserved for future callers; business logic remains in this service
+        del source
         command = str(command or "").strip()
         if not command:
             return AgentResult(False, False, AgentStatus.DICTATION, "Пустая команда")
@@ -80,6 +109,7 @@ class DesktopAgentService:
         finally:
             with self._state_lock:
                 self._active_token = None
+                self._pending_confirmation = None
             self._run_lock.release()
 
     def _execute(self, command: str, token: CancellationToken) -> AgentResult:
@@ -116,13 +146,11 @@ class DesktopAgentService:
         steps = []
         for call in calls:
             token.raise_if_cancelled()
-            self._event(AgentStatus.EXECUTING, f"Выполняю {call.name}…", tool=call.name)
-            result = self.registry.execute(call, token)
+            result = self._execute_tool(command, call, token)
             steps.append(result)
             self.session.remember_tool(call.name, call.arguments, result)
             if not result.success:
                 self.session.add_turn(command, result.message, False)
-                self._event(AgentStatus.ERROR, result.message, tool=call.name, success=False)
                 return AgentResult(True, False, AgentStatus.ERROR, result.message,
                                    command=command, steps=steps, used_model=used_model)
         message = steps[-1].message if steps else "Готово"
@@ -139,14 +167,19 @@ class DesktopAgentService:
             {"role": "user", "content": command},
         ]
         steps = []
+        failures = Counter()
         max_steps = max(1, min(32, int(self.cfg.get("max_agent_steps", 8))))
-        for _ in range(max_steps):
+
+        # One final model turn is allowed after the last permitted tool so it can report
+        # completion, but no tool can execute once len(steps) reaches max_steps.
+        for _ in range(max_steps + 1):
             token.raise_if_cancelled()
             try:
                 response = self.provider.chat(messages, self.registry.schemas(), token)
             except OllamaError as exc:
                 return self._provider_error(command, str(exc), steps=steps, used_model=True)
             assistant = dict(response.get("message") or {})
+            assistant.pop("thinking", None)
             calls = _parse_tool_calls(assistant.get("tool_calls") or [])
             messages.append(assistant or {"role": "assistant", "content": ""})
             if not calls:
@@ -158,18 +191,54 @@ class DesktopAgentService:
                 self._event(status, message, success=success)
                 return AgentResult(True, success, status, message, command=command,
                                    steps=steps, used_model=True)
+
             for call in calls:
                 token.raise_if_cancelled()
                 if len(steps) >= max_steps:
                     return self._step_limit(command, max_steps, steps)
-                self._event(AgentStatus.EXECUTING, f"Выполняю {call.name}…", tool=call.name)
-                result = self.registry.execute(call, token)
+                result = self._execute_tool(command, call, token)
                 steps.append(result)
                 self.session.remember_tool(call.name, call.arguments, result)
+                signature = call.name + json.dumps(call.arguments, sort_keys=True,
+                                                   ensure_ascii=False)
+                if not result.success:
+                    failures[signature] += 1
+                    if failures[signature] >= 2:
+                        result.data["repeated_failure"] = True
+                # Tool output is observation, never another user instruction.
                 messages.append({"role": "tool", "tool_name": call.name,
                                  "content": result.for_model()})
 
         return self._step_limit(command, max_steps, steps)
+
+    def _execute_tool(self, command, call, token):
+        self._event(AgentStatus.EXECUTING, f"Выполняю {call.name}…", tool=call.name)
+        result = self.registry.execute(
+            call, token, command=command, confirm=lambda request: self._confirm(request, token))
+        self._event(AgentStatus.EXECUTING if result.success else AgentStatus.ERROR,
+                    result.message, tool=call.name, success=result.success)
+        return result
+
+    def _confirm(self, request: ConfirmationRequest, token: CancellationToken) -> bool:
+        with self._state_lock:
+            self._pending_confirmation = request
+        self._event(
+            AgentStatus.WAITING_CONFIRMATION,
+            request.description,
+            tool=request.tool,
+            data={"risk": request.risk, "arguments": safe_arguments(request.arguments)},
+        )
+        callback = self.events.get("confirmation")
+        try:
+            if callback is None:
+                return False
+            callback(request)
+            return request.wait(
+                token, timeout=float(self.cfg.get("confirmation_timeout_seconds", 120.0)))
+        finally:
+            with self._state_lock:
+                if self._pending_confirmation is request:
+                    self._pending_confirmation = None
 
     def _step_limit(self, command, max_steps, steps):
         message = f"Задача остановлена: достигнут лимит {max_steps} шагов"
@@ -184,11 +253,12 @@ class DesktopAgentService:
         return AgentResult(True, False, AgentStatus.ERROR, message, command=command,
                            steps=steps or [], used_model=used_model)
 
-    def _event(self, status, message, *, tool=None, success=None):
+    def _event(self, status, message, *, tool=None, success=None, data=None):
         callback = self.events.get("event")
         if callback:
             try:
-                callback(AgentEvent(status, str(message), tool=tool, success=success))
+                callback(AgentEvent(
+                    status, str(message), tool=tool, success=success, data=data or {}))
             except Exception:
                 log.exception("Desktop Agent event callback failed")
 

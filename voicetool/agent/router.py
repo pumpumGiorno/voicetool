@@ -38,8 +38,14 @@ FOLDER_ALIASES = {
     "музыка": "music", "music": "music", "видео": "videos", "videos": "videos",
     "домашняя": "home", "home": "home",
 }
+STEAM_GAME_ALIASES = {
+    "дота": "Dota 2", "дота 2": "Dota 2", "dota": "Dota 2", "dota 2": "Dota 2",
+}
 _CANCEL = {"стоп", "остановись", "отмена", "отмени", "прекрати", "stop", "cancel"}
-_PRONOUNS = {"его", "ее", "её", "это", "его окно", "ее окно", "её окно"}
+_PRONOUNS = {
+    "его", "ее", "её", "это", "его окно", "ее окно", "её окно", "туда", "там",
+    "к нему", "к ней", "в него", "в нее", "в неё",
+}
 _ACTION_OPENERS = re.compile(
     r"^(?:пожалуйста\s+)?(?:открой|запусти|закрой|сделай|поставь|уменьши|увеличь|"
     r"выключи|включи|потише|погромче|переключись|сверни|разверни|восстанови|"
@@ -86,15 +92,21 @@ class VoiceCommandRouter:
         if not segments:
             return []
         calls = []
-        for segment in segments:
-            call = self._parse_segment(segment)
+        reference = ""
+        for index, segment in enumerate(segments):
+            call = self._parse_segment(segment, reference)
+            if call is None and index > 0:
+                target = _target(re.sub(r"^(?:потом|затем)\s+", "", segment))
+                call = _launch_target(target) if _simple_app_target(target) else None
             if call is None:
                 return []
             calls.append(call)
+            reference = _call_target(call) or reference
         return calls
 
-    def _parse_segment(self, segment: str) -> ToolCall | None:
+    def _parse_segment(self, segment: str, plan_reference="") -> ToolCall | None:
         segment = segment.strip(" ,.!?—-")
+        segment = re.sub(r"^(?:потом|затем)\s+", "", segment)
         volume = _volume_call(segment)
         if volume:
             return volume
@@ -135,25 +147,26 @@ class VoiceCommandRouter:
                 return ToolCall("open_url", {"url": target})
             if re.fullmatch(r"(?:[\w-]+\.)+[a-zа-я]{2,}(?:/\S*)?", target, re.I):
                 return ToolCall("open_url", {"url": "https://" + target})
-            return (ToolCall("launch_app", {"app_name": target})
-                    if _simple_app_target(target) else None)
+            return _launch_target(target) if _simple_app_target(target) else None
 
         match = re.fullmatch(r"(?:запусти|launch|start)\s+(.+)", segment)
         if match:
             target = _target(match.group(1))
-            return (ToolCall("launch_app", {"app_name": target})
-                    if _simple_app_target(target) else None)
+            return _launch_target(target) if _simple_app_target(target) else None
 
         match = re.fullmatch(r"(?:закрой|close)\s+(.+)", segment)
         if match:
-            target = self._resolve_reference(_target(match.group(1)), "app")
+            target = self._resolve_reference(_target(match.group(1)), "app", plan_reference)
             if target.startswith("окно "):
                 return ToolCall("close_window", {"window": target[5:]})
             return ToolCall("close_app", {"app_name": target}) if target else None
 
-        match = re.fullmatch(r"(?:переключись на|переключи на|вернись в|focus)\s+(.+)", segment)
+        match = re.fullmatch(
+            r"(?:переключись на|переключи на|вернись(?:\s+(?:в|к))?|focus)\s+(.+)",
+            segment,
+        )
         if match:
-            target = self._resolve_reference(_target(match.group(1)), "app")
+            target = self._resolve_reference(_target(match.group(1)), "app", plan_reference)
             return ToolCall("focus_app", {"app_name": target}) if target else None
 
         for pattern, tool in (
@@ -163,24 +176,47 @@ class VoiceCommandRouter:
         ):
             match = re.fullmatch(pattern, segment)
             if match:
-                target = self._resolve_reference(_target(match.group(1)), "window")
+                target = self._resolve_reference(_target(match.group(1)), "window", plan_reference)
                 return ToolCall(tool, {"window": target}) if target else None
         return None
 
-    def _resolve_reference(self, target: str, kind: str) -> str:
+    def _resolve_reference(self, target: str, kind: str, plan_reference="") -> str:
         if target in _PRONOUNS:
-            return self.session.reference(kind)
+            return plan_reference or self.session.reference(kind)
         return target
 
 
 def _split_steps(text: str) -> list[str]:
-    parts = re.split(
-        r"\s*(?:;|,\s*(?=(?:открой|запусти|закрой|найди|сверни|разверни|напиши|введи))|"
-        r"\s+(?:а\s+)?(?:потом|затем|после этого)\s+|"
-        r"\s+и\s+(?=(?:открой|запусти|закрой|найди|сверни|разверни|напиши|введи|набери)))\s*",
-        re.sub(r"\s+", " ", text.strip()), flags=re.I,
+    text = re.sub(r"\s+", " ", text.strip())
+    text = re.sub(r",\s*(?=(?:потом|затем)\s+)", ";", text, flags=re.I)
+    text = re.sub(
+        r",\s*(?=(?:dota|дота(?:\s+2)?|telegram|телеграм|chrome|хром|steam|стим)\b)",
+        ";", text, flags=re.I,
     )
+    text = re.sub(r"\s+(?:а\s+)?(?:потом|затем|после этого)\s+", ";", text, flags=re.I)
+    text = re.sub(
+        r",\s*(?=(?:открой|запусти|закрой|найди|сверни|разверни|восстанови|"
+        r"напиши|введи|переключись|вернись))",
+        ";", text, flags=re.I,
+    )
+    text = re.sub(
+        r"\s+и\s+(?=(?:открой|запусти|закрой|найди|сверни|разверни|восстанови|"
+        r"напиши|введи|набери|переключись|вернись))",
+        ";", text, flags=re.I,
+    )
+    parts = text.split(";")
     return [part.strip() for part in parts if part.strip()]
+
+
+def _launch_target(target: str) -> ToolCall | None:
+    if target in STEAM_GAME_ALIASES:
+        return ToolCall("launch_steam_game", {"game_name": STEAM_GAME_ALIASES[target]})
+    return ToolCall("launch_app", {"app_name": target}) if target else None
+
+
+def _call_target(call: ToolCall) -> str:
+    return str(call.arguments.get("app_name") or call.arguments.get("game_name")
+               or call.arguments.get("window") or call.arguments.get("path") or "")
 
 
 def _volume_call(text: str) -> ToolCall | None:
@@ -219,7 +255,7 @@ def _clean(text: str) -> str:
 
 def _target(value: str) -> str:
     value = value.strip().lower().replace("ё", "е")
-    value = re.sub(r"^(?:приложение|программу)\s+", "", value)
+    value = re.sub(r"^(?:приложение|программу|игру)\s+", "", value)
     value = re.sub(r"\s+пожалуйста$", "", value)
     return value.strip(" \"'.,!?")
 

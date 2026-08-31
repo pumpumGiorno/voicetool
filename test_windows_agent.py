@@ -296,9 +296,11 @@ class RegistryStage2Tests(unittest.TestCase):
             "set_volume", "change_volume", "mute_volume", "unmute_volume",
             "open_file", "open_folder", "find_file", "show_in_folder",
         }
-        self.assertEqual(set(registry.names), required)
-        forbidden = {"mouse_click", "take_screenshot", "launch_steam_game",
-                     "invoke_ui_element", "shell", "powershell", "run_command"}
+        stage3 = {"get_installed_steam_games", "resolve_steam_game",
+                  "launch_steam_game", "wait"}
+        self.assertEqual(set(registry.names), required | stage3)
+        forbidden = {"mouse_click", "take_screenshot", "invoke_ui_element",
+                     "shell", "powershell", "run_command"}
         self.assertFalse(set(registry.names) & forbidden)
 
     def test_invalid_arguments_are_structured(self):
